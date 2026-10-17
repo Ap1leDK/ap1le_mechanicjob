@@ -5,13 +5,15 @@ use_experimental_fxv2_oal 'yes'
 
 name 'ap1le_mechanicjob'
 author 'Ap1leDK'
-description 'Mechanic job: repair, part swaps, cosmetic tuning, towing and invoices'
-version '1.0.0'
+description 'Mekanikerjob: reparation, fysiske del-skift, tuning, lager og bestilling, chefens computer, bugsering og fakturaer'
+version '2.0.0'
 
 shared_scripts {
     '@ox_lib/init.lua',
     '@es_extended/imports.lua',
+    '@ap1le_core/imports.lua',
     'config.lua',
+    'shared/colours.lua',
 }
 
 client_scripts {
@@ -22,6 +24,8 @@ client_scripts {
     'client/tuning.lua',
     'client/billing.lua',
     'client/towing.lua',
+    'client/stock.lua',
+    'client/computer.lua',
 }
 
 server_scripts {
@@ -31,6 +35,8 @@ server_scripts {
     'server/performance.lua',
     'server/tuning.lua',
     'server/billing.lua',
+    'server/stock.lua',
+    'server/computer.lua',
 }
 
 ui_page 'html/index.html'
@@ -38,8 +44,8 @@ ui_page 'html/index.html'
 files {
     'locales/*.json',
     'html/index.html',
-    'html/style.css',
-    'html/script.js',
+    'html/css/*.css',
+    'html/js/*.js',
 }
 
-dependencies { 'es_extended', 'ox_lib', 'oxmysql', 'ox_inventory', 'ox_target', 'esx_addonaccount' }
+dependencies { 'es_extended', 'ox_lib', 'oxmysql', 'ox_inventory', 'ox_target', 'esx_addonaccount', 'ap1le_core' }
