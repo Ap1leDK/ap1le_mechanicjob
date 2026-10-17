@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ap1le_mechanicjob</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+    <!-- ============================ Tuning panel (right side) ============================ -->
+    <div id="tuning" class="layer layer-right" hidden>
+        <section class="glass panel" role="dialog" aria-labelledby="t-vehicle" tabindex="-1">
+            <header class="p-head">
+                <div class="p-title">
+                    <span class="eyebrow" data-i18n="ui_tuning_title"></span>
+                    <h1 id="t-vehicle"></h1>
+                </div>
+                <div class="p-head-right">
+                    <span class="plate" id="t-plate"></span>
+                    <button type="button" class="icon-btn" id="t-x" data-i18n-aria="ui_close"></button>
+                </div>
+            </header>
+
+            <nav class="tabs" role="tablist" id="t-tabs">
+                <button type="button" class="tab" role="tab" data-tab="performance"><span data-i18n="ui_performance"></span><i class="badge" hidden></i></button>
+                <button type="button" class="tab" role="tab" data-tab="cosmetic"><span data-i18n="ui_cosmetic"></span><i class="badge" hidden></i></button>
+                <button type="button" class="tab" role="tab" data-tab="paint"><span data-i18n="ui_paint"></span><i class="badge" hidden></i></button>
+                <button type="button" class="tab" role="tab" data-tab="extras"><span data-i18n="ui_extras"></span><i class="badge" hidden></i></button>
+            </nav>
+
+            <div class="cams" role="group" data-i18n-aria="ui_camera">
+                <span class="cams-label" data-i18n="ui_camera"></span>
+                <div class="cams-btns" id="t-cams"></div>
+            </div>
+
+            <div class="p-body" id="t-body" role="tabpanel"></div>
+
+            <footer class="cart">
+                <div class="cart-head">
+                    <span data-i18n="ui_cart"></span>
+                    <span class="count" id="c-count"></span>
+                </div>
+                <ul class="cart-list" id="c-list"></ul>
+                <p class="cart-empty" id="c-empty" data-i18n="ui_empty_cart"></p>
+                <div class="cart-total">
+                    <span data-i18n="ui_total"></span>
+                    <strong id="c-total">$0</strong>
+                </div>
+                <div class="cart-actions">
+                    <button type="button" class="btn ghost" id="t-close" data-i18n="ui_close"></button>
+                    <button type="button" class="btn primary" id="t-install" data-i18n="ui_install" disabled></button>
+                </div>
+            </footer>
+        </section>
+    </div>
+
+    <!-- ============================ Invoice create dialog (mechanic) ============================ -->
+    <div id="invoice" class="layer layer-center" hidden>
+        <section class="glass dialog" role="dialog" aria-labelledby="i-title" tabindex="-1">
+            <header class="d-head">
+                <h2 id="i-title" data-i18n="ui_invoice_title"></h2>
+            </header>
+
+            <div class="field">
+                <span class="field-label" data-i18n="ui_customer"></span>
+                <div class="players" id="i-players" role="radiogroup" data-i18n-aria="ui_customer"></div>
+            </div>
+
+            <div class="field">
+                <div class="lines-head">
+                    <span class="field-label" data-i18n="ui_line_label"></span>
+                    <span class="field-label right" data-i18n="ui_amount"></span>
+                </div>
+                <div class="lines" id="i-lines"></div>
+                <button type="button" class="btn ghost small" id="i-add"><span class="plus" aria-hidden="true">+</span><span data-i18n="ui_add_line"></span></button>
+            </div>
+
+            <div class="i-total">
+                <span data-i18n="ui_total"></span>
+                <div class="i-total-right">
+                    <strong id="i-total">$0</strong>
+                    <span class="cap" id="i-cap"></span>
+                </div>
+            </div>
+            <div class="meter"><i id="i-meter"></i></div>
+
+            <p class="error" id="i-error" role="alert" hidden></p>
+
+            <div class="d-actions">
+                <button type="button" class="btn ghost" id="i-cancel" data-i18n="ui_cancel"></button>
+                <button type="button" class="btn primary" id="i-send" data-i18n="ui_send"></button>
+            </div>
+        </section>
+    </div>
+
+    <!-- ============================ Customer invoice popup (top centre) ============================ -->
+    <div id="popup" class="layer layer-top" hidden>
+        <section class="glass popup" role="alertdialog" aria-labelledby="p-from" tabindex="-1">
+            <div class="pop-top">
+                <div class="pop-from">
+                    <span class="eyebrow" data-i18n="ui_invoice_from"></span>
+                    <h2 id="p-from"></h2>
+                </div>
+                <div class="pop-total" id="p-total"></div>
+            </div>
+            <ul class="pop-lines" id="p-lines"></ul>
+            <div class="pop-timer">
+                <div class="meter"><i id="p-bar"></i></div>
+                <span id="p-exp"></span>
+            </div>
+            <p class="error" id="p-error" role="alert" hidden></p>
+            <div class="pop-actions">
+                <button type="button" class="btn ghost danger" id="p-decline" data-i18n="ui_decline"></button>
+                <button type="button" class="btn primary" id="p-accept" data-i18n="ui_accept"></button>
+            </div>
+        </section>
+    </div>
+
+</div>
+<script src="script.js"></script>
+</body>
+</html>
