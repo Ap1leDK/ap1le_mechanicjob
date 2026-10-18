@@ -1,5 +1,6 @@
 -- ap1le_mechanicjob: built-in invoices (mechanic -> nearby customer).
--- The server owns the amounts, the expiry and the money split; the client only shows the popup.
+-- The server owns the amounts, the expiry and the money split; the client only shows the dialog.
+-- Every paid invoice is logged in ap1le_mechanicjob_invoices (shown in the computer's economy app).
 
 local invoices = {}       -- [id] = { id, from, to, lines, total, expires }
 local openByTarget = {}   -- [targetId] = invoice id
@@ -8,14 +9,24 @@ local nextId = 0
 
 local MAX_LABEL = 48
 
-local function notify(target, msg, nType)
-    TriggerClientEvent('ap1le_mechanicjob:notify', target, msg, nType)
-end
+local notify = Mechanic.Notify
+local formatMoney = Mechanic.FormatMoney
 
----Money as shown in notifications, e.g. $17,300 (digit grouping follows the ESX locale).
-local function formatMoney(n)
-    local ok, grouped = pcall(function() return ESX.Math.GroupDigits(n) end)
-    return '$' .. ((ok and type(grouped) == 'string') and grouped or tostring(n))
+---Log a paid invoice. Runs after the money moved, so a failed insert is only logged to the console.
+local function logInvoice(invoice, xMechanic, xCustomer, societyShare)
+    local ok, err = pcall(MySQL.insert.await, [[
+        INSERT INTO `ap1le_mechanicjob_invoices`
+            (`workshop`, `mechanic_identifier`, `mechanic_name`, `customer_identifier`, `customer_name`,
+             `total`, `society_share`, `lines`, `created_at`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ]], {
+        invoice.workshop, xMechanic.identifier, Mechanic.PlayerName(xMechanic),
+        xCustomer.identifier, Mechanic.PlayerName(xCustomer),
+        invoice.total, societyShare, json.encode(invoice.lines), os.time(),
+    })
+    if not ok then
+        print(('[ap1le_mechanicjob] logging invoice %d failed (was sql/install.sql run?): %s'):format(invoice.id, tostring(err)))
+    end
 end
 
 local function removeInvoice(id)
@@ -144,6 +155,8 @@ lib.callback.register('ap1le_mechanicjob:invoice:create', function(source, targe
         lines = clean,
         total = total,
         expires = expires,
+        -- Workshop the mechanic was in when sending it (nil for field invoices), for the invoice log
+        workshop = (Mechanic.PlayerWorkshop(source) or {}).id,
     }
     openByTarget[targetId] = id
     lastSent[source] = GetGameTimer()
@@ -152,7 +165,7 @@ lib.callback.register('ap1le_mechanicjob:invoice:create', function(source, targe
         expireInvoice(id, expires)
     end)
 
-    local mechanicName = xPlayer.getName()
+    local mechanicName = Mechanic.PlayerName(xPlayer)
 
     TriggerClientEvent('ap1le_mechanicjob:invoice:show', targetId, {
         id = id,
@@ -162,8 +175,8 @@ lib.callback.register('ap1le_mechanicjob:invoice:create', function(source, targe
         expireSeconds = expireSeconds,
     })
 
-    notify(source, locale('invoice_sent', xTarget.getName()), 'success')
-    notify(targetId, locale('invoice_received', mechanicName), 'inform')
+    notify(source, locale('invoice_sent', Mechanic.PlayerName(xTarget)), 'success')
+    notify(targetId, locale('invoice_received', mechanicName), 'info')
 
     return true, { id = id }
 end)
@@ -202,8 +215,9 @@ lib.callback.register('ap1le_mechanicjob:invoice:respond', function(source, id, 
     local xTarget = ESX.GetPlayerFromId(source)
     if not xTarget then return false, 'error' end
 
+    -- The sender must still be a mechanic: a fired or resigned mechanic cannot collect old invoices
     local xMechanic = ESX.GetPlayerFromId(invoice.from)
-    if not xMechanic then
+    if not xMechanic or not xMechanic.job or xMechanic.job.name ~= Config.Job then
         removeInvoice(id)
         TriggerClientEvent('ap1le_mechanicjob:invoice:hide', source, id)
         return false, 'not_available'
@@ -221,12 +235,7 @@ lib.callback.register('ap1le_mechanicjob:invoice:respond', function(source, id, 
     -- Remove the invoice before moving money so it can never be paid twice
     removeInvoice(id)
 
-    local before = account.money
-    local removed = xTarget.removeAccountMoney(accountName, total, 'ap1le_mechanicjob invoice')
-    local after = xTarget.getAccount(accountName)
-    after = after and after.money
-
-    if removed == false or after ~= before - total then
+    if not Mechanic.MovePlayerMoney(xTarget, accountName, total, false, 'ap1le_mechanicjob invoice') then
         print(('[ap1le_mechanicjob] invoice %d: removing %d from %s failed'):format(id, total, xTarget.identifier))
         TriggerClientEvent('ap1le_mechanicjob:invoice:hide', source, id)
         return false, 'error'
@@ -237,31 +246,49 @@ lib.callback.register('ap1le_mechanicjob:invoice:respond', function(source, id, 
     if societyShare < 0 then societyShare = 0 elseif societyShare > total then societyShare = total end
     local mechanicShare = total - societyShare
 
-    if societyShare > 0 then
-        local paid = false
+    if societyShare > 0 and not Mechanic.SocietyAdd(societyShare) then
+        print(('[ap1le_mechanicjob] society account "%s" did not accept %d, paying its share to the mechanic'):format(Config.Invoice.society, societyShare))
+        mechanicShare = mechanicShare + societyShare
+        societyShare = 0
+    end
 
-        TriggerEvent('esx_addonaccount:getSharedAccount', Config.Invoice.society, function(society)
-            -- addMoney returns false (and credits nothing) for an invalid amount or a balance overflow
-            if society and society.addMoney(societyShare) ~= false then
-                paid = true
-            end
-        end)
-
-        if not paid then
-            print(('[ap1le_mechanicjob] society account "%s" not found or did not accept %d, paying its share to the mechanic'):format(Config.Invoice.society, societyShare))
-            mechanicShare = mechanicShare + societyShare
+    if mechanicShare > 0 and not Mechanic.MovePlayerMoney(xMechanic, 'bank', mechanicShare, true, 'ap1le_mechanicjob invoice') then
+        -- Last resort so the customer's money is never lost: hand the mechanic's share to the society
+        if Mechanic.SocietyAdd(mechanicShare) then
+            societyShare = societyShare + mechanicShare
+            mechanicShare = 0
+        else
+            print(('[ap1le_mechanicjob] invoice %d: could not pay %d to %s or the society'):format(id, mechanicShare, xMechanic.identifier))
         end
     end
 
-    if mechanicShare > 0 then
-        xMechanic.addAccountMoney('bank', mechanicShare, 'ap1le_mechanicjob invoice')
-    end
+    logInvoice(invoice, xMechanic, xTarget, societyShare)
 
     TriggerClientEvent('ap1le_mechanicjob:invoice:hide', source, id)
     notify(source, locale('invoice_paid', formatMoney(total)), 'success')
     notify(invoice.from, locale('invoice_paid_mechanic', formatMoney(total), formatMoney(mechanicShare)), 'success')
 
     return true
+end)
+
+---Drop every open invoice sent by a mechanic and close the customer's dialog.
+---@param from number mechanic server id
+local function dropInvoicesFrom(from)
+    for id, invoice in pairs(invoices) do
+        if invoice.from == from then
+            removeInvoice(id)
+            if GetPlayerName(invoice.to) then
+                TriggerClientEvent('ap1le_mechanicjob:invoice:hide', invoice.to, id)
+            end
+        end
+    end
+end
+
+-- A mechanic who leaves the job loses the invoices still waiting for an answer
+-- (the job is re-read from ESX, so a forged trigger of this event cannot drop someone else's invoices)
+AddEventHandler('esx:setJob', function(playerId)
+    if type(playerId) ~= 'number' or Mechanic.GetMechanic(playerId) then return end
+    dropInvoicesFrom(playerId)
 end)
 
 AddEventHandler('playerDropped', function()

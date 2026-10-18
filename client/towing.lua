@@ -82,29 +82,29 @@ function Towing.Load(vehicle)
     if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
 
     if not Mechanic.IsMechanic() then
-        UI.Notify(locale('not_mechanic'), 'error')
+        Ap1le.Notify(locale('not_mechanic'), 'error')
         return
     end
 
     if Towing.IsTruck(vehicle) or IsEntityAttached(vehicle) then
-        UI.Notify(locale('tow_no_vehicle'), 'error')
+        Ap1le.Notify(locale('tow_no_vehicle'), 'error')
         return
     end
 
     local truck = Towing.FindTruck(vehicle)
     if not truck then
-        UI.Notify(locale('tow_no_truck'), 'error')
+        Ap1le.Notify(locale('tow_no_truck'), 'error')
         return
     end
 
     if not NetworkGetEntityIsNetworked(vehicle) or not NetworkGetEntityIsNetworked(truck) then
-        UI.Notify(locale('error'), 'error')
+        Ap1le.Notify(locale('error'), 'error')
         return
     end
 
     -- Never winch a vehicle somebody is sitting in
     if not IsVehicleSeatFree(vehicle, -1) or GetVehicleNumberOfPassengers(vehicle) > 0 then
-        UI.Notify(locale('busy'), 'error')
+        Ap1le.Notify(locale('busy'), 'error')
         return
     end
 
@@ -112,7 +112,7 @@ function Towing.Load(vehicle)
 
     CreateThread(function()
         if not Mechanic.RequestControl(truck) or not Mechanic.RequestControl(vehicle) then
-            UI.Notify(locale('error'), 'error')
+            Ap1le.Notify(locale('error'), 'error')
             working = false
             return
         end
@@ -120,21 +120,21 @@ function Towing.Load(vehicle)
         local completed = Anim.Winch(truck, vehicle, Config.Towing.winchTime)
 
         if not completed then
-            UI.Notify(locale('cancelled'), 'inform')
+            Ap1le.Notify(locale('cancelled'), 'info')
             working = false
             return
         end
 
         if not DoesEntityExist(vehicle) or not DoesEntityExist(truck)
             or #(GetEntityCoords(vehicle) - GetEntityCoords(truck)) > Config.Towing.maxDistance + 5.0 then
-            UI.Notify(locale('tow_no_truck'), 'error')
+            Ap1le.Notify(locale('tow_no_truck'), 'error')
             working = false
             return
         end
 
         -- Another mechanic may have loaded the truck while we were winching
         if Towing.GetLoaded(truck) then
-            UI.Notify(locale('busy'), 'error')
+            Ap1le.Notify(locale('busy'), 'error')
             working = false
             return
         end
@@ -155,7 +155,7 @@ function Towing.Load(vehicle)
         Entity(truck).state:set(STATE_KEY, NetworkGetNetworkIdFromEntity(vehicle), true)
         findCache.vehicle = 0
 
-        UI.Notify(locale('tow_loaded'), 'success')
+        Ap1le.Notify(locale('tow_loaded'), 'success')
         working = false
     end)
 end
@@ -167,13 +167,13 @@ function Towing.Unload(truck)
     if not truck or truck == 0 or not DoesEntityExist(truck) then return end
 
     if not Mechanic.IsMechanic() then
-        UI.Notify(locale('not_mechanic'), 'error')
+        Ap1le.Notify(locale('not_mechanic'), 'error')
         return
     end
 
     local vehicle = Towing.GetLoaded(truck)
     if not vehicle then
-        UI.Notify(locale('tow_no_vehicle'), 'error')
+        Ap1le.Notify(locale('tow_no_vehicle'), 'error')
         return
     end
 
@@ -181,7 +181,7 @@ function Towing.Unload(truck)
 
     CreateThread(function()
         if not Mechanic.RequestControl(truck) or not Mechanic.RequestControl(vehicle) then
-            UI.Notify(locale('error'), 'error')
+            Ap1le.Notify(locale('error'), 'error')
             working = false
             return
         end
@@ -189,7 +189,7 @@ function Towing.Unload(truck)
         local completed = Anim.Winch(truck, vehicle, Config.Towing.winchTime)
 
         if not completed then
-            UI.Notify(locale('cancelled'), 'inform')
+            Ap1le.Notify(locale('cancelled'), 'info')
             working = false
             return
         end
@@ -220,7 +220,7 @@ function Towing.Unload(truck)
         Entity(truck).state:set(STATE_KEY, nil, true)
         findCache.vehicle = 0
 
-        UI.Notify(locale('tow_unloaded'), 'success')
+        Ap1le.Notify(locale('tow_unloaded'), 'success')
         working = false
     end)
 end

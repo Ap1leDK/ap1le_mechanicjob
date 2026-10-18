@@ -2,9 +2,13 @@
 -- scenarios and props. Global `Anim` (see CONTRACT.md section 4).
 --
 -- Every public sequence blocks (call it inside a thread) and returns true when completed,
--- false when cancelled (INPUT_FRONTEND_CANCEL / backspace, ped dead, too far, vehicle gone).
+-- false when cancelled. Each step shows an ap1le_core progress bar "<step> (i/n)" while the
+-- step's choreography runs; the bar has no anim/prop (this file drives the ped) and ends together
+-- with its step. Cancel = ap1le_core's cancel key (X) or anything that makes Ap1le.Progress return
+-- false (death, ragdoll, falling ...), plus our own checks (too far, vehicle/crate gone), which
+-- call Ap1le.CancelProgress.
 -- All exit paths run the same cleanup: props deleted, tasks cleared, doors closed, vehicle
--- lowered, unfrozen and put back on the ground, ropes/particles removed, scaleforms released.
+-- lowered, unfrozen and put back on the ground, ropes/particles removed.
 --
 -- All dicts/clips, scenarios, props and particle effects below were checked against
 -- github.com/DurtyFree/gta-v-data-dumps (animDictsCompact.json, scenariosCompact.json,
@@ -34,6 +38,14 @@ local A = {
     groundWork = { dict = 'amb@medic@standing@tendtodead@idle_a', clip = 'idle_a', flag = 1 },
     spray      = { dict = 'switch@franklin@lamar_tagging_wall', clip = 'lamar_tagging_wall_loop_lamar', flag = 49 },
     lever      = { dict = 'anim@scripted@heist@ig2_hand_lever@male@', clip = 'idle_lever', flag = 49 },
+    -- crate looting with a crowbar (Tuners train robbery; the dict also has 'loot_crowbar'/'loot_crate'
+    -- companion clips, which confirms it is the crowbar pry). Played on the ped only.
+    pry        = { dict = 'anim@scripted@player@mission@trn_ig1_loot@male@', clip = 'loot', flag = 1 },
+    -- standing at a keyboard (FIB heist computer). Same clips as the "type4"/"type" emotes of rpemotes.
+    typeEnter  = { dict = 'mp_fbi_heist', clip = 'intro', flag = 0 },
+    typeLoop   = { dict = 'mp_fbi_heist', clip = 'loop', flag = 1 },
+    typeExit   = { dict = 'mp_fbi_heist', clip = 'outro', flag = 0 },
+    typeAlt    = { dict = 'anim@heists@prison_heiststation@cop_reactions', clip = 'cop_b_idle', flag = 1 },
 }
 
 local SCENARIO = {
@@ -59,6 +71,8 @@ local P = {
     panel   = 'imp_prop_impexp_car_panel_01a',
     turbo   = 'lr_prop_carburettor_01',  -- turbo-sized intake part (no turbo prop exists)
     spray   = 'prop_cs_spray_can',
+    crowbar = 'w_me_crowbar',
+    box     = 'hei_prop_heist_box',
 }
 
 local FX = {
@@ -67,17 +81,39 @@ local FX = {
 }
 
 local BONE_PH_R_HAND = 28422
+local BONE_SKEL_L_HAND = 60309
 local BONE_ROOT = 0
 
 -- Yaw correction for the hoist model so its boom points at the vehicle. The model's forward
 -- axis is not documented; adjust here if the boom faces the wrong way in your build.
 local HOIST_YAW = 0.0
 
--- 177 and 202 (the cancel keys below) are disabled too, so they cannot open the phone or pause
--- menu mid-sequence and IsDisabledControlJustPressed reliably reports them
-local DISABLED_CONTROLS = { 21, 22, 23, 24, 25, 30, 31, 32, 33, 34, 35, 36, 37, 44, 140, 141, 142, 143, 177, 199, 200, 202, 257, 263, 264 }
-local CONTROL_CANCEL = 202       -- INPUT_FRONTEND_CANCEL (Esc / Backspace)
-local CONTROL_CANCEL_ALT = 177   -- INPUT_CELLPHONE_CANCEL (Backspace)
+-- Disabled for the whole sequence (also in the frames between two progress bars). The bars
+-- disable move/car/combat themselves; 23 (INPUT_ENTER) would pull the ped out of its task.
+-- The cancel key belongs to ap1le_core (X by default), so no cancel control is captured here.
+local DISABLED_CONTROLS = { 21, 22, 23, 24, 25, 30, 31, 32, 33, 34, 35, 36, 37, 44, 140, 141, 142, 143, 257, 263, 264 }
+
+-- Font Awesome (6.7 free, bundled with ap1le_core) icon per step label
+local STEP_ICONS = {
+    step_open_hood = 'car',
+    step_close_hood = 'car-side',
+    step_hoist = 'dolly',
+    step_unbolt = 'screwdriver-wrench',
+    step_bolt = 'wrench',
+    step_lift_out = 'up-long',
+    step_lift_in = 'down-long',
+    step_jack_up = 'arrow-up',
+    step_jack_down = 'arrow-down',
+    step_wheel_off = 'circle-dot',
+    step_wheel_on = 'circle-dot',
+    step_under_car = 'screwdriver',
+    step_weld = 'fire-flame-curved',
+    step_paint = 'spray-can',
+    step_fit_part = 'gears',
+    step_winch = 'truck-pickup',
+    step_crate_open = 'box-open',
+    step_crate_unload = 'boxes-stacked',
+}
 
 local WHEELS = {
     { bone = 'wheel_lf', tyre = 0 },
@@ -644,11 +680,14 @@ end
 -- Cleanup
 ---------------------------------------------------------------------------------------------
 
+local cancelBar -- defined with the progress bar helpers below
+
 local function cleanup(c)
     if c.cleaned then return end
     c.cleaned = true
     c.cancelled = true
     if active == c then active = nil end
+    pcall(cancelBar, c)
 
     local ped = c.ped
 
@@ -711,9 +750,105 @@ local function cleanup(c)
     for dict in pairs(c.dicts) do RemoveAnimDict(dict) end
     for hash in pairs(c.models) do SetModelAsNoLongerNeeded(hash) end
     c.dicts, c.models = {}, {}
+end
 
-    UI.ClearButtons()
-    UI.TimerBar.Release()
+---------------------------------------------------------------------------------------------
+-- Progress bars (ap1le_core). One bar per step, started together with the step.
+--
+-- ap1le_core facts this relies on (client/progress.lua of ap1le_core):
+--  * a Progress without `anim` never touches the ped's tasks (stopAnim only runs for its own
+--    anim), so our choreography keeps running across bar boundaries;
+--  * Progress returns false at once while another bar is active, and its `active` slot is cleared
+--    before it returns, so the next step's bar can start as soon as the previous call returned;
+--  * CancelProgress only flags the running bar; that call then returns false a frame later.
+-- Every bar is a small object owned by its step (`c.bar`). A bar that is no longer the current
+-- one, or that we released ourselves, can never cancel the sequence when it resolves false.
+---------------------------------------------------------------------------------------------
+
+local BAR_DISABLE = { move = true, car = true, combat = true }
+local BAR_FILLER_MS = 1500   -- extra bar while a step overruns its share (e.g. a long walk)
+local BAR_GRACE_MS = 150     -- the step may finish a few frames after its bar
+
+cancelBar = function(c)
+    local bar = c.bar
+    if not bar then return end
+    bar.released = true
+    if bar.running then UI.CancelProgress() end
+end
+
+local function startBar(c, label, icon, ms)
+    local bar = { running = false, done = false, ok = nil, stepDone = false, released = false }
+    c.bar = bar
+
+    CreateThread(function()
+        local duration = ms
+        while true do
+            -- released before it even started (sequence cancelled in the same frame)
+            if bar.released or c.cancelled then break end
+            -- no Wait between this flag and the core registering the bar (the export runs
+            -- synchronously up to its first wait), so cancelBar can never hit another resource's bar
+            bar.running = true
+            local ok = UI.Progress({
+                label = label,
+                duration = math.max(500, math.floor(duration)),
+                icon = icon,
+                canCancel = true,
+                disable = BAR_DISABLE,
+            })
+            bar.running = false
+
+            if not ok then
+                bar.ok = false
+                -- cancel key, death, ragdoll ... cancels the sequence; a stale bar does not
+                if c.bar == bar and not bar.released and not c.cleaned then
+                    c.cancelled = true
+                end
+                break
+            end
+            bar.ok = true
+
+            -- the step usually ends in the same frame or the next one
+            local grace = GetGameTimer() + BAR_GRACE_MS
+            while not bar.stepDone and not bar.released and not c.cancelled and GetGameTimer() < grace do
+                Wait(0)
+            end
+            if bar.stepDone or bar.released or c.cancelled or c.bar ~= bar then break end
+
+            -- the step overran: keep a bar (and with it the cancel key) up until it finishes
+            duration = BAR_FILLER_MS
+        end
+        bar.running = false
+        bar.done = true
+    end)
+
+    return bar
+end
+
+-- The step's work is done: let its bar run out so both end together
+local function finishBar(c, bar, deadline)
+    bar.stepDone = true
+    while not bar.done do
+        if c.cancelled then return false end
+        if GetGameTimer() > deadline then
+            -- never resolved (ap1le_core restarting?): drop it and carry on
+            bar.released = true
+            if bar.running then UI.CancelProgress() end
+            break
+        end
+        Wait(0)
+    end
+    if bar.ok == false and not bar.released then return false end
+    return not c.cancelled
+end
+
+-- Another resource's bar may still be on screen: give it a moment instead of failing the step
+local function waitForFreeBar(timeoutMs)
+    local deadline = GetGameTimer() + timeoutMs
+    while UI.IsProgressActive() do
+        if GetGameTimer() > deadline then return false end
+        Wait(50)
+    end
+    return true
 end
 
 ---------------------------------------------------------------------------------------------
@@ -722,44 +857,25 @@ end
 
 local function monitor(c)
     CreateThread(function()
-        UI.Buttons({ { control = CONTROL_CANCEL, label = locale('ui_cancel') } })
-    end)
-
-    CreateThread(function()
         local maxDist = (Config.MaxVehicleDistance or 6.0) + 2.0
-        local help = locale('help_cancel')
-        local stepBar = { label = '', progress = 0.0 }
-        local infoBar = { label = '', text = '' }
-        local bars = { stepBar, infoBar }
 
         while active == c and not c.cancelled do
             for i = 1, #DISABLED_CONTROLS do DisableControlAction(0, DISABLED_CONTROLS[i], true) end
 
             local ped = c.ped
             local ref = c.distanceRef or c.vehicle
-            if IsDisabledControlJustPressed(0, CONTROL_CANCEL) or IsDisabledControlJustPressed(0, CONTROL_CANCEL_ALT) then
-                c.cancelled = true
-            elseif not DoesEntityExist(ped) or IsPedDeadOrDying(ped, true) then
+            if not DoesEntityExist(ped) or IsPedDeadOrDying(ped, true) then
                 c.cancelled = true
             elseif not DoesEntityExist(c.vehicle) or (c.extra and not DoesEntityExist(c.extra)) then
                 c.cancelled = true
-            elseif #(GetEntityCoords(ped) - GetEntityCoords(ref)) > maxDist then
+            elseif not DoesEntityExist(ref) or #(GetEntityCoords(ped) - GetEntityCoords(ref)) > maxDist then
                 c.cancelled = true
             end
-            if c.cancelled then break end
 
-            local now = GetGameTimer()
-            local inStep = math.max(0, math.min(now - c.stepStart, c.stepMs))
-            local done = c.baseMs + inStep
-            local left = math.max(0, math.ceil((c.totalMs - done) / 1000))
-
-            stepBar.label = c.stepLabel
-            stepBar.progress = done / c.totalMs
-            infoBar.label = ('%d/%d'):format(c.stepIndex, c.stepCount)
-            infoBar.text = ('%d:%02d'):format(left // 60, left % 60)
-
-            UI.HelpText(help)
-            UI.TimerBar.Draw(bars)
+            if c.cancelled then
+                cancelBar(c)
+                break
+            end
             Wait(0)
         end
     end)
@@ -778,31 +894,40 @@ local function runSteps(c, steps)
     for i, s in ipairs(steps) do
         local ms = math.floor(c.totalMs * (s.w or 1.0) / weight)
         local started = GetGameTimer()
+        local endAt = started + ms
         c.stepIndex = i
         c.stepLabel = locale(s.label)
         c.stepStart = started
         c.stepMs = math.max(1, ms)
         c.baseMs = acc
 
-        local ok = s.fn(c, ms, started + ms)
+        local label = ('%s (%d/%d)'):format(c.stepLabel, i, c.stepCount)
+        local bar = startBar(c, label, s.icon or STEP_ICONS[s.label] or 'wrench', ms)
+
+        local ok = s.fn(c, ms, endAt)
         if ok == false or c.cancelled then return false end
-        if not waitUntil(c, started + ms) then return false end
+        if not waitUntil(c, endAt) then return false end
+        if not finishBar(c, bar, GetGameTimer() + 8000) then return false end
         acc = acc + ms
     end
     return true
 end
 
-local function run(vehicle, totalMs, buildSteps, opts)
-    if active then return false end
-    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return false end
+local function run(entity, totalMs, buildSteps, opts)
+    if active or Anim.IsAtLaptop() then return false end
+    if not entity or entity == 0 or not DoesEntityExist(entity) then return false end
     opts = opts or {}
 
+    -- A bar of another resource would make our first step fail at once
+    if not waitForFreeBar(3000) then return false end
+    if active or not DoesEntityExist(entity) then return false end
+
     totalMs = math.max(1000, math.floor(tonumber(totalMs) or 0))
-    local c = newContext(vehicle, totalMs, opts.extra)
+    local c = newContext(entity, totalMs, opts.extra)
     c.distanceRef = opts.distanceRef
     active = c
 
-    freeze(c, vehicle)
+    if not opts.noFreeze then freeze(c, entity) end
     if opts.extra then freeze(c, opts.extra) end
     monitor(c)
 
@@ -1814,11 +1939,295 @@ local Cosmetics = {
 }
 
 ---------------------------------------------------------------------------------------------
+-- Delivery crate: crowbar it open, take the boxes out and set them down beside it
+---------------------------------------------------------------------------------------------
+
+-- Box held in front of the chest with the box-carry clip (placement from rpemotes' "box" emote)
+local BOX_CARRY_POS = vec3(0.025, 0.08, 0.255)
+local BOX_CARRY_ROT = vec3(-145.0, 290.0, 0.0)
+local BOX_CYCLE_MS = 4300   -- rough length of one take-walk-set-down cycle
+local BOX_MAX = 6
+
+-- c.vehicle is the crate entity here (the generic context works for any entity with a model)
+local function crateLayout(c)
+    if c.crateInfo then return c.crateInfo end
+    local crate = c.vehicle
+    local cx, cy = (c.min.x + c.max.x) * 0.5, (c.min.y + c.max.y) * 0.5
+    local centre = G(c, cx, cy)
+    local reach = math.max(c.max.x - c.min.x, c.max.y - c.min.y) * 0.5 + 0.5
+    local work = approach(c, centre, reach)
+
+    local towards = vec3(centre.x - work.x, centre.y - work.y, 0.0)
+    local len = #towards
+    local dir = len > 0.01 and towards / len or (L(c, 0.0, 1.0, 0.0) - L(c, 0.0, 0.0, 0.0))
+    local right = vec3(dir.y, -dir.x, 0.0)
+    local top = GetOffsetFromEntityInWorldCoords(crate, cx, cy, c.max.z)
+
+    c.crateInfo = {
+        centre = centre,
+        work = work,
+        dir = dir,
+        right = right,
+        top = top,
+        height = top.z - c.groundZ,
+        heading = headingTo(work, centre),
+        -- boxes go in a row on the right of the crate, starting level with its middle
+        rowStart = centre + right * (reach + 0.15),
+    }
+    return c.crateInfo
+end
+
+local function boxSpot(c, info, index)
+    local min, max = modelDims(c, P.box)
+    local col = (index - 1) % 3
+    local layer = (index - 1) // 3
+    local p = info.rowStart - info.dir * (0.45 * col)
+    return vec3(p.x, p.y, c.groundZ - min.z + layer * (max.z - min.z)), vec3(p.x, p.y, c.groundZ)
+end
+
+-- Reach into the crate and bring a box up to the chest
+local function takeBox(c, info)
+    local min, max = modelDims(c, P.box)
+    local inside = vec3(info.top.x, info.top.y, info.top.z - (max.z - min.z) * 0.6)
+    local box = spawnProp(c, P.box, inside, vec3(0.0, 0.0, info.heading))
+    if not box then return nil end
+
+    if info.height > 0.6 then
+        playAnim(c, A.standWork)
+        if not sleep(c, 650) then return nil end
+    else
+        playAnim(c, A.kneelDown)
+        if not sleep(c, 800) then return nil end
+    end
+
+    local up = inside + vec3(0.0, 0.0, (max.z - min.z) + 0.15)
+    if not tween(c, 300, function(t) moveProp(box, lerp(inside, up, t)) end) then return nil end
+    if not tween(c, 350, function(t)
+        moveProp(box, lerp(up, GetOffsetFromEntityInWorldCoords(c.ped, CARRY_OFFSET.x, CARRY_OFFSET.y, CARRY_OFFSET.z), t))
+    end) then return nil end
+    attachTo(c, box, BONE_SKEL_L_HAND, BOX_CARRY_POS, BOX_CARRY_ROT)
+    playAnim(c, A.carry)
+    if c.cancelled then return nil end
+    return box
+end
+
+local function buildUnpack(c)
+    return {
+        {
+            label = 'step_crate_open', w = 1.0,
+            fn = function(c, ms, endAt)
+                local info = crateLayout(c)
+                if not goTo(c, info.work, info.centre) then return false end
+                local crowbar = holdTool(c, P.crowbar)
+                playAnim(c, A.pry)
+                -- clip missing in this game build: lean in and work at the lid instead
+                if not c.dicts[A.pry.dict] then playAnim(c, A.standWork) end
+                local ok = waitUntil(c, endAt - 250)
+                deleteProp(c, crowbar)
+                return ok
+            end,
+        },
+        {
+            label = 'step_crate_unload', w = 1.4,
+            fn = function(c, ms, endAt)
+                local info = crateLayout(c)
+                local count = 0
+                repeat
+                    if not goTo(c, info.work, info.centre) then return false end
+                    local box = takeBox(c, info)
+                    if c.cancelled then return false end
+                    if not box then break end
+                    count = count + 1
+
+                    local floorPos, spot = boxSpot(c, info, count)
+                    if not goTo(c, approach(c, spot, 0.62), spot, true) then return false end
+                    if not putDown(c, box, floorPos, vec3(0.0, 0.0, info.heading)) then return false end
+                until count >= BOX_MAX or (endAt - GetGameTimer()) < BOX_CYCLE_MS + 1200
+
+                -- finish standing at the crate
+                if not goTo(c, info.work, info.centre) then return false end
+                playAnim(c, A.standWork)
+                if not waitUntil(c, endAt - 400) then return false end
+                stopTask(c)
+                return not c.cancelled
+            end,
+        },
+    }
+end
+
+---------------------------------------------------------------------------------------------
+-- Laptop: walk up to it and type until Anim.StopLaptop(). No progress bar.
+---------------------------------------------------------------------------------------------
+
+-- Where the user stands, in the laptop's local space. prop_laptop_01a's screen faces its -Y side
+-- (the side a ped stands on when the prop is placed with the ped's heading); flip the sign here
+-- if the ped ends up behind the screen in your build.
+local LAPTOP_STAND = vec2(0.0, -0.7)
+local LAPTOP_MOVE_CONTROLS = { 21, 22, 23, 30, 31, 32, 33, 34, 35, 36, 44 }
+
+local laptop = nil -- { ped, entity, stopped, broken, anim, enter, exit, dicts }
+
+local function laptopDict(l, a)
+    if l.dicts[a.dict] then return true end
+    if not pcall(lib.requestAnimDict, a.dict, 3000) then return false end
+    l.dicts[a.dict] = true
+    return true
+end
+
+-- Walk to `target` (2D) with a stuck check. Navmesh first (desks), straight line as fallback.
+local function laptopWalk(l, target, heading)
+    local ped = l.ped
+    for attempt = 1, 2 do
+        if attempt == 1 then
+            TaskFollowNavMeshToCoord(ped, target.x, target.y, target.z, 1.0, 4000, 0.15, 0, heading)
+        else
+            TaskGoStraightToCoord(ped, target.x, target.y, target.z, 1.0, 3000, heading, 0.1)
+        end
+        local started = GetGameTimer()
+        local stillSince = nil
+        while true do
+            if l.stopped then return false end
+            for i = 1, #LAPTOP_MOVE_CONTROLS do DisableControlAction(0, LAPTOP_MOVE_CONTROLS[i], true) end
+            local pos = GetEntityCoords(ped)
+            if #(pos.xy - target.xy) <= 0.3 then return true end
+            local now = GetGameTimer()
+            if now - started > 4500 then break end
+            if now - started > 700 and GetEntitySpeed(ped) < 0.05 then
+                stillSince = stillSince or now
+                if now - stillSince > 500 then break end
+            else
+                stillSince = nil
+            end
+            Wait(0)
+        end
+    end
+    return not l.stopped
+end
+
+local function laptopFace(l, heading)
+    local ped = l.ped
+    TaskAchieveHeading(ped, heading, 800)
+    local deadline = GetGameTimer() + 800
+    while GetGameTimer() < deadline do
+        if l.stopped then return end
+        local diff = math.abs(((GetEntityHeading(ped) - heading + 180.0) % 360.0) - 180.0)
+        if diff < 8.0 then break end
+        Wait(0)
+    end
+    SetEntityHeading(ped, heading)
+end
+
+local function laptopPlay(ped, a, blendIn)
+    TaskPlayAnim(ped, a.dict, a.clip, blendIn or 3.0, 2.0, -1, a.flag, 0.0, false, false, false)
+end
+
+local function laptopRelease(l)
+    for dict in pairs(l.dicts) do RemoveAnimDict(dict) end
+    l.dicts = {}
+end
+
+-- Keeps the typing loop alive (another script or a bump can stop it); no per-frame work
+local function laptopKeepAlive(l)
+    CreateThread(function()
+        local ped = l.ped
+        if l.enter then
+            laptopPlay(ped, l.enter)
+            local duration = (GetAnimDuration(l.enter.dict, l.enter.clip) or 1.0) * 1000
+            local untilAt = GetGameTimer() + math.max(300, math.min(2500, duration - 200))
+            while laptop == l and not l.stopped and GetGameTimer() < untilAt do Wait(50) end
+        end
+        while laptop == l and not l.stopped do
+            if not DoesEntityExist(ped) or IsEntityDead(ped) or IsPedRagdoll(ped) or IsPedInAnyVehicle(ped, false) then
+                -- never fight the game: no restart and no outro after this
+                l.broken = true
+                break
+            end
+            if l.anim and not IsEntityPlayingAnim(ped, l.anim.dict, l.anim.clip, 3) then
+                laptopPlay(ped, l.anim, 2.0)
+            end
+            Wait(300)
+        end
+    end)
+end
+
+---------------------------------------------------------------------------------------------
 -- Public API
 ---------------------------------------------------------------------------------------------
 
+function Anim.IsAtLaptop()
+    return laptop ~= nil
+end
+
 function Anim.IsBusy()
-    return active ~= nil
+    return active ~= nil or laptop ~= nil
+end
+
+-- Blocks while walking to the laptop (a few seconds at most), then returns: true when the ped is
+-- at the laptop and typing (also when no typing clip could be loaded), false when busy, invalid or
+-- stopped meanwhile. The typing loop keeps running until Anim.StopLaptop().
+function Anim.Laptop(entity)
+    if active or laptop then return false end
+    if not entity or entity == 0 or not DoesEntityExist(entity) then return false end
+    local ped = cache.ped or PlayerPedId()
+    if IsPedInAnyVehicle(ped, false) or IsEntityDead(ped) then return false end
+
+    local l = { ped = ped, entity = entity, stopped = false, broken = false, dicts = {} }
+    laptop = l
+
+    local stand = GetOffsetFromEntityInWorldCoords(entity, LAPTOP_STAND.x, LAPTOP_STAND.y, 0.0)
+    local pedPos = GetEntityCoords(ped)
+    local target = vec3(stand.x, stand.y, pedPos.z)
+    local heading = headingTo(target, GetEntityCoords(entity))
+
+    if #(pedPos.xy - target.xy) > 0.3 and not laptopWalk(l, target, heading) then
+        if laptop == l then laptop = nil end
+        return false
+    end
+    if l.stopped or not DoesEntityExist(entity) then
+        if laptop == l then laptop = nil end
+        return false
+    end
+    laptopFace(l, headingTo(GetEntityCoords(ped), GetEntityCoords(entity)))
+
+    if laptopDict(l, A.typeLoop) then
+        l.anim, l.enter, l.exit = A.typeLoop, A.typeEnter, A.typeExit
+    elseif laptopDict(l, A.typeAlt) then
+        l.anim = A.typeAlt
+    end
+
+    if l.stopped then
+        laptopRelease(l)
+        if laptop == l then laptop = nil end
+        return false
+    end
+
+    laptopKeepAlive(l)
+    return true
+end
+
+-- Non-blocking: plays the short outro in its own thread, then lets go of the ped
+function Anim.StopLaptop()
+    local l = laptop
+    if not l then return end
+    l.stopped = true
+    laptop = nil
+
+    CreateThread(function()
+        local ped = l.ped
+        if not l.broken and l.exit and DoesEntityExist(ped) and not IsEntityDead(ped) and HasAnimDictLoaded(l.exit.dict) then
+            laptopPlay(ped, l.exit, 2.0)
+            local duration = (GetAnimDuration(l.exit.dict, l.exit.clip) or 1.0) * 1000
+            local untilAt = GetGameTimer() + math.max(300, math.min(1800, duration - 150))
+            while GetGameTimer() < untilAt and not active and not laptop do Wait(50) end
+        end
+        -- only stop our own clips; a new sequence or laptop session may already own the ped
+        if not active and not laptop and DoesEntityExist(ped) then
+            for _, a in ipairs({ A.typeEnter, A.typeLoop, A.typeExit, A.typeAlt }) do
+                if IsEntityPlayingAnim(ped, a.dict, a.clip, 3) then StopAnimTask(ped, a.dict, a.clip, 2.0) end
+            end
+        end
+        laptopRelease(l)
+    end)
 end
 
 function Anim.StopAll()
@@ -1828,6 +2237,7 @@ function Anim.StopAll()
         cleanup(c)
     end
     active = nil
+    Anim.StopLaptop()
 end
 
 function Anim.Repair(vehicle, kind, totalMs)
@@ -1845,6 +2255,13 @@ end
 function Anim.Cosmetic(vehicle, animType, totalMs)
     local build = Cosmetics[animType] or Cosmetics.body
     return run(vehicle, totalMs or (Config.Cosmetic and Config.Cosmetic.animTime) or 6000, build)
+end
+
+-- crate = the (local) crate object. Ends standing next to the crate. Cancelled when the crate
+-- disappears (collected by someone else, streamed out) or the mechanic walks away.
+function Anim.Unpack(crate, totalMs)
+    if not crate or crate == 0 or not DoesEntityExist(crate) then return false end
+    return run(crate, totalMs or (Config.Shop and Config.Shop.unpackTime) or 8000, buildUnpack, { noFreeze = true })
 end
 
 function Anim.Winch(truck, vehicle, totalMs)
@@ -1891,5 +2308,20 @@ end
 
 AddEventHandler('onResourceStop', function(resource)
     if resource ~= GetCurrentResourceName() then return end
-    Anim.StopAll()
+    local c = active
+    if c then
+        c.cancelled = true
+        cleanup(c)
+    end
+    active = nil
+
+    -- no threads run any more: stop the typing clips right away
+    local l = laptop
+    laptop = nil
+    if l and DoesEntityExist(l.ped) then
+        for _, a in ipairs({ A.typeEnter, A.typeLoop, A.typeExit, A.typeAlt }) do
+            if IsEntityPlayingAnim(l.ped, a.dict, a.clip, 3) then StopAnimTask(l.ped, a.dict, a.clip, 2.0) end
+        end
+        laptopRelease(l)
+    end
 end)

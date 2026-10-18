@@ -22,7 +22,7 @@ local function applyRepair(vehicle, kind, result)
     if not DoesEntityExist(vehicle) then return end
 
     if not Mechanic.RequestControl(vehicle) then
-        UI.Notify(locale('error'), 'error')
+        Ap1le.Notify(locale('error'), 'error')
         return
     end
 
@@ -71,7 +71,7 @@ local function applyRepair(vehicle, kind, result)
         SetVehicleUndriveable(vehicle, false)
     end
 
-    UI.Notify(locale(('repair_%s_done'):format(kind)), 'success')
+    Ap1le.Notify(locale(('repair_%s_done'):format(kind)), 'success')
 end
 
 ---Start a repair on a vehicle. kind = engine|body|tyre|field.
@@ -83,22 +83,22 @@ function Repair.Start(vehicle, kind)
     if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
 
     if not Mechanic.IsMechanic() then
-        UI.Notify(locale('not_mechanic'), 'error')
+        Ap1le.Notify(locale('not_mechanic'), 'error')
         return
     end
 
     if IsPedInAnyVehicle(cache.ped, false) then
-        UI.Notify(locale('busy'), 'error')
+        Ap1le.Notify(locale('busy'), 'error')
         return
     end
 
     if cfg.workshopOnly and not Mechanic.InWorkshop() then
-        UI.Notify(locale('not_in_workshop'), 'error')
+        Ap1le.Notify(locale('not_in_workshop'), 'error')
         return
     end
 
     if not NetworkGetEntityIsNetworked(vehicle) then
-        UI.Notify(locale('error'), 'error')
+        Ap1le.Notify(locale('error'), 'error')
         return
     end
 
@@ -109,14 +109,14 @@ function Repair.Start(vehicle, kind)
         local ok, data = lib.callback.await('ap1le_mechanicjob:repair:begin', false, netId, kind)
 
         if not ok then
-            UI.Notify(failText(data), 'error')
+            Ap1le.Notify(failText(data), 'error')
             working = false
             return
         end
 
         if not Mechanic.RequestControl(vehicle) then
             cancelPending()
-            UI.Notify(locale('error'), 'error')
+            Ap1le.Notify(locale('error'), 'error')
             working = false
             return
         end
@@ -126,7 +126,7 @@ function Repair.Start(vehicle, kind)
 
         if not completed then
             cancelPending()
-            UI.Notify(locale('cancelled'), 'inform')
+            Ap1le.Notify(locale('cancelled'), 'info')
             working = false
             return
         end
@@ -134,7 +134,7 @@ function Repair.Start(vehicle, kind)
         local finished, result = lib.callback.await('ap1le_mechanicjob:repair:finish', false)
 
         if not finished then
-            UI.Notify(failText(result), 'error')
+            Ap1le.Notify(failText(result), 'error')
             working = false
             return
         end

@@ -1,44 +1,62 @@
 # ap1le_mechanicjob
 
-A mechanic job for ESX Legacy. Mechanics repair vehicles, swap performance parts, apply cosmetic
-tuning in a glassmorphism tuning menu, tow vehicles on a flatbed and bill customers with invoices.
+Mekanikerjob til ESX Legacy. Mekanikerne reparerer køretøjer, skifter performance-dele fra værkstedets lager,
+tuner udseendet i et kamera-styret tuning-panel, bugserer biler på en flatbed, sender fakturaer og bestiller
+dele, som ikke er på lager. Chefen har en fysisk computer på værkstedet til lager, bestillinger, personale og økonomi.
 
-## Features
+## Funktioner
 
-- **Repairs**: full engine and body repairs and tyre changes in a workshop, and a quick engine
-  field repair that works anywhere (repair kit, capped at a configurable engine health).
-- **Performance swaps**: engine, brakes, transmission, suspension, armour and turbo, in levels.
-  Each swap is two physical steps: the old part is taken out, then the new part is put in.
-  Swapped-out parts go back into the mechanic's inventory.
-- **Cosmetic tuning**: spoilers, bumpers, skirts, exhaust, wheels, paint, window tint, xenon,
-  neon, plate style and more, in a right-side tuning panel where the car stays visible.
-- **Towing**: load a vehicle onto a flatbed and unload it at a drop point.
-- **Invoices**: a mechanic sends an itemised invoice to a nearby player, who accepts or declines
-  it. The payment is split between the mechanic's society and the mechanic who sent it.
-- **Workshops**: work with full repairs, performance swaps and cosmetic tuning only happens
-  inside a configured workshop. Blips are shown on the map.
+- **Reparationer**: fuld motor- og karosserireparation og dækskift i et værksted. Motorreparation på stedet
+  virker overalt med et reparationssæt, dog kun op til en konfigurerbar motorstatus.
+- **Performance-skift**: motor, bremser, gearkasse, undervogn, panser og turbo, i niveauer. Hvert skift er to
+  fysiske trin med animation: den gamle del tages ud, og den nye monteres. Dele tages fra og lægges tilbage i
+  værkstedets lager (stash), ikke i mekanikerens egen taske.
+- **Cosmetic tuning**: alle GTA-muligheder for køretøjet, grupperet i kategorier og underkategorier. Man kan
+  bevæge kameraet rundt om bilen med musen (træk for at dreje, rul for at zoome) eller bruge kamerapresets.
+  Lakering har alle GTA-farver, grupperet i metallic, matte, metal, chrome, perlemor, worn/util og chameleon.
+- **Lager og bestilling**: hvert værksted har et lager. Dele, som ikke er på lager, kan bestilles fra tuning-menuen
+  eller fra computeren. Virksomheden betaler, og leverancen kommer som en kasse ved leveringspunktet.
+- **Chefens computer**: en fysisk computer på hvert værksted med et macOS-lignende UI (skrivebord, menulinje med
+  ur, dock og programvinduer). Se afsnittet om computeren.
+- **Bugsering**: læs et køretøj op på en flatbed og aflæs det på et afleveringssted.
+- **Fakturaer**: en mekaniker sender en faktura med linjer til en spiller i nærheden, som accepterer eller afviser den.
+  Beløbet deles mellem virksomhedens konto og den mekaniker, der sendte fakturaen.
+- **Værksteder**: fuld reparation, performance-skift, tuning og bestillinger virker kun i et konfigureret værksted
+  (undtagen motorreparation på stedet og computerens programmer, der også virker ved computeren).
 
-## Dependencies
+## Afhængigheder
 
-| Resource | Purpose |
+| Resource | Formål |
 |---|---|
-| `oxmysql` | Database access |
-| `ox_lib` | Callbacks, notifications, locales, points, context menus |
-| `es_extended` | ESX Legacy core (jobs, players, accounts) |
-| `ox_inventory` | Items for repair kits and performance parts |
-| `ox_target` | Vehicle interaction options |
-| `esx_addonaccount` | Shared society account for mechanic income |
+| `ap1le_core` | Notifikationer, menuer, dialoger, progress-bjælke og hjælpetekst (UI-laget i hele resourcen) |
+| `es_extended` | ESX Legacy-kernen (job, spillere, konti) |
+| `ox_lib` | Callbacks, locales og hjælpefunktioner |
+| `oxmysql` | Databaseadgang |
+| `ox_inventory` | Varer, lagre (stashes) og kasser |
+| `ox_target` | Interaktion med køretøjer, lagre, kasser og computeren |
+| `esx_addonaccount` | Virksomhedskonto (`society_mechanic`) |
 
 ## Installation
 
-1. **Database.** Run `sql/install.sql` once on the server database. It creates the `mechanic` job,
-   its four grades (recruit, mechanic, experienced, boss), the `society_mechanic` account and the
-   `ap1le_mechanicjob_parts` table (a server-only record of the parts this resource installed).
-   The script can be run again safely. It does not change `owned_vehicles`.
-2. **Items.** Open `install/items.lua` and paste its entries into the main table of
-   `ox_inventory/data/items.lua`. Add one PNG per item to `ox_inventory/web/images/<name>.png`.
-3. **Resource.** Copy the `ap1le_mechanicjob` folder into your `resources` directory.
-4. **server.cfg.** Start the resources in this order:
+1. **Database.** Kør `sql/install.sql` én gang på serverens database. Scriptet opretter jobbet `mechanic` med
+   fire grader (0 recruit, 1 mechanic, 2 experienced, 3 boss), virksomhedskontoen `society_mechanic` og disse
+   tabeller:
+   - `ap1le_mechanicjob_parts`: hvilke performance-dele scriptet har monteret (server-side).
+   - `ap1le_mechanicjob_orders`: bestillinger og leverancer, pr. værksted.
+   - `ap1le_mechanicjob_invoices`: betalte fakturaer.
+   - `ap1le_mechanicjob_transactions`: indsættelser, hævninger, bestillinger og fakturaer til økonomien.
+   - `ap1le_mechanicjob_prices`: prisliste for cosmetic-dele, som overskriver priserne i `config.lua`.
+
+   Scriptet kan køres igen uden problemer: eksisterende grader (også nogen, du har omdøbt eller ændret løn på)
+   bliver ikke rørt. Det ændrer ikke `owned_vehicles`.
+
+   **Genstart serveren bagefter.** ESX læser jobs og grader, og esx_addonaccount læser virksomhedskonti, kun når
+   de starter. Indtil genstarten virker ansættelse/forfremmelse og bestillinger ikke.
+2. **Items.** Åbn `install/items.lua` og indsæt alle elementerne i hovedtabellen i `ox_inventory/data/items.lua`.
+   Læg et PNG-billede pr. vare i `ox_inventory/web/images/<navn>.png`, fx `engine_lvl1.png`. Genstart derefter
+   `ox_inventory`. Filen indeholder alle reparationssæt, performance-dele på alle niveauer og turbo.
+3. **Resource.** Kopiér mappen `ap1le_mechanicjob` til din `resources`-mappe.
+4. **server.cfg.** Start resources i denne rækkefølge (ap1le_core skal være før dette script):
 
    ```
    ensure oxmysql
@@ -47,138 +65,163 @@ tuning in a glassmorphism tuning menu, tow vehicles on a flatbed and bill custom
    ensure ox_inventory
    ensure ox_target
    ensure esx_addonaccount
+   ensure ap1le_core
    ensure ap1le_mechanicjob
    ```
 
-5. **Give the job.** Assign the `mechanic` job to a player with the ESX job tools, and pick a grade.
-   All grades can use every feature. Only the grade label differs.
+5. **Giv jobbet.** Tildel jobbet `mechanic` til en spiller med ESX's jobværktøjer og vælg en grad. Alle grader
+   kan bruge alle funktioner undtagen chefens programmer, som kræver grad 3 eller højere (se nedenfor).
 
-## Configuration
+## Konfiguration
 
-Everything is set in `config.lua`. The main settings:
+Alt indstilles i `config.lua`. Vigtigste punkter:
 
-- `Config.Job`: job name that can use the resource (`mechanic`).
-- `Config.Workshops`: list of workshops. Each has a `coords`, a `radius` and a blip. Full
-  repairs, swaps and tuning need the mechanic to be inside one of these spheres.
-- `Config.MaxVehicleDistance`: how close the mechanic must be to the vehicle.
-- `Config.Repair`: item, time and workshop requirement for each repair. `field` also sets
-  `maxEngineHealth`.
-- `Config.Performance`: for each part, the item names for each level, the removal and install
-  times, and the GTA mod type.
-- `Config.Cosmetic`: which cosmetic mods are available, their prices and the animation used.
-- `Config.Colours`: paint palette shown in the tuning menu.
-- `Config.Invoice`: society account, society share, maximum lines and total, expiry time,
-  distance and cooldown.
-- `Config.Towing`: flatbed model, attach and unload offsets, and load distance.
-- `Config.MinTimeFactor`: the server rejects a finish that comes too early. The default is 0.8
-  of the expected time.
+- **Værksteder (`Config.Workshops`)**. Hvert værksted har en `id`, en `label`, `coords` og `radius` (sfæren hvor
+  fuld reparation, skift og tuning virker), en blip og tre punkter:
+  - `stash`: værkstedets lager. Lageret er et ox_inventory-stash med id `ap1le_mechanicjob_<id>`, og det oprettes
+    automatisk ved start. `slots` og `weight` sætter størrelsen.
+  - `computer`: computerens position og retning (`w`). `spawnProp = true` spawner en bærbar computer med
+    `prop_laptop_01a` på pladsen.
+  - `delivery`: hvor leverede kasser står, klar til afhentning.
+- **`Config.BossGrade`**: den mindste jobgrad, der er "chef" (standard `3`). Chefen bruger personale, økonomi og
+  prisliste på computeren. Serveren tjekker grad ved hvert kald.
+- **`Config.Repair`**, **`Config.Performance`**: dele, tider og niveauer for reparationer og skift.
+- **`Config.Shop`**: leveringstid (`deliveryMinutes`), oppakningstid (`unpackTime`), højeste antal pr. vare og
+  pr. ordre (`maxPerLine`, `maxLines`), højeste antal åbne ordrer pr. værksted (`maxOpenOrders`), og prisen pr.
+  vare i `items`.
+- **`Config.Cosmetic`**: grupper, underkategorier, mods og ekstra valg, med standardpris og animation for hver.
+  `maxPrice` er den højeste pris, chefen kan sætte i prislisten.
+- **`Config.Invoice`**: virksomhedskonto, andel til virksomheden (`societyShare`), største antal linjer og samlet
+  beløb, udløbstid, afstand og ventetid.
+- **`Config.Computer`**: afstande til computeren, bankkonto til ind- og udbetalinger, højeste overførselsbeløb og
+  antal historikrækker.
+- **`Config.Towing`**: flatbed-model og forskydninger.
 
-Change item names only if you also change them in `install/items.lua`.
+Ændr kun varenavne, hvis du også ændrer dem i `install/items.lua`.
 
-## How swaps work
+## Lager og bestillinger
 
-A performance swap runs in two steps, and each step is a real animation with props:
+Hvert værksted har sit eget lager. Performance-skift tager den nye del fra lageret og lægger den gamle tilbage.
+Hvis den nye del ikke er på lageret, kan du se det i tuning-menuen (knappen "Bestil" ved niveauer uden lager) og
+bestille den der, eller bestille den fra computerens program "Bestil".
 
-1. **Remove.** The old part is taken out of the car. For example, for an engine the mechanic opens
-   the hood, brings in the hoist, unbolts the engine and lifts the old block out. The old part
-   is returned to the mechanic's inventory.
-2. **Install.** The new part is brought in, lifted into place, bolted down and the hood is closed.
+En bestilling fungerer sådan:
 
-The new part is removed from the inventory when the install step finishes. Stock (level 0) has
-no item. Turbo is a single on/off part. Length of each step comes from `removeTime` and
-`installTime` in `Config.Performance`. The server checks the time and the items, not the client.
+1. Mekanikeren vælger varer og antal. Serveren tjekker varerne mod `Config.Shop.items`, antal og linjer, og at
+   værkstedet ikke har for mange åbne ordrer. Prisen tages fra konfigurationen, ikke fra spilleren.
+   Mekanikere under chef-graden kan kun bestille små ordrer: 1 slags vare, højst 2 stk., højst $30.000 pr. ordre
+   og højst 2 åbne ordrer ad gangen (konstanterne `STAFF_MAX_*` øverst i `server/stock.lua`). Chefen har de fulde
+   grænser fra `Config.Shop`.
+2. Virksomhedskontoen betaler summen. Hvis den ikke har penge nok, bliver bestillingen afvist.
+3. Ordren står som "på vej" i `Config.Shop.deliveryMinutes`. I den tid ser alle mekanikere ordrerne i
+   computerens "Ordrer"-program og i F6-menuen under "Åbne bestillinger".
+4. Når tiden er gået, står en kasse ved værkstedets leveringspunkt. Alle mekanikere får besked om det.
+5. En mekaniker går hen til kassen og vælger "Pak kassen ud". Kassen åbnes med animation og bar, og varerne
+   lægges i værkstedets lager. Hvis lageret er fuldt, bliver kassen stående, og der kommer en besked.
 
-A removed part is only returned when this resource installed that exact level (recorded in
-`ap1le_mechanicjob_parts`). Parts fitted elsewhere, for example bought at a cash tuning shop or
-present before this resource was installed, can still be swapped out, but no item is returned.
-If the old part no longer fits in the mechanic's inventory after the swap, it is dropped on the
-ground next to them.
+Ordrer gemmes i databasen, så de overlever en genstart af serveren.
 
-Swaps and cosmetic saves on an owned vehicle need the owner to be present: the mechanic must
-own the vehicle, or the owner must be online and within 30 m of it. The vehicle model must also
-match the stored model.
+## Computeren
 
-## How invoices split
+Computeren er en fysisk bærbar på værkstedet. Man bruger den med target-menuen "Brug computeren". Den har et
+macOS-lignende UI med skrivebord, menulinje (med ur og værkstedets navn), dock og vinduer, som kan flyttes,
+minimeres og lukkes. Det røde trafiklys lukker et vindue. Esc eller "Luk computer" i menuen lukker computeren.
 
-When a customer accepts an invoice:
+| Program | Hvem | Hvad |
+|---|---|---|
+| **Lager** | Alle mekanikere | Varer i værkstedets lager med antal og status (på lager, lav beholdning, ikke på lager). Søg og filtrér efter kategori. |
+| **Bestil** | Alle mekanikere | Katalog med varer, kurv, antal og total. "Virksomheden betaler". "Bestil" sender ordren. |
+| **Ordrer** | Alle mekanikere | Åbne og afhentede ordrer med en nedtælling til leveringen. |
+| **Personale** | Chef | Ansatte med online-status og stilling. Ansæt nærliggende spillere, skift stilling eller fyr. |
+| **Økonomi** | Chef | Virksomhedens saldo, indsæt og hæv på chefens konto, og historik over fakturaer, ordrer og overførsler. |
+| **Prisliste** | Chef | Overskriv priser på cosmetic-dele. Ændringer gemmes først, når du trykker "Gem priser". |
 
-- The customer pays `Config.Invoice.account` (bank by default). The payment must cover the total.
-- `Config.Invoice.societyShare` (default 70 percent) goes to the `society_mechanic` account.
-- The rest (default 30 percent) goes to the bank account of the mechanic who sent the invoice.
+Regler for chefen:
 
-Both sides receive a notification. An invoice expires after `expireSeconds` if the customer does
-not respond. The totals and prices are checked by the server, and the client cannot change them.
+- Personale: man kan kun ansætte spillere, der står inden for `Config.Computer.hireDistance` fra computeren og
+  ikke allerede er mekanikere. Spilleren får et jobtilbud på sin egen skærm og skal selv sige ja (tilbuddet lukker
+  efter 30 sekunder); først derefter skifter jobbet. Man kan kun ændre og fyre ansatte med en lavere stilling end sin egen, og aldrig sig selv.
+  Ansatte, der er offline, kan også ændres.
+- Økonomi: indsættelse og hævning går mellem chefens bankkonto (`Config.Computer.account`) og virksomhedskontoen,
+  og beløbet er et helt tal fra 1 til `maxTransfer`.
+- Prisliste: hver pris skal være et helt tal fra 0 til `Config.Cosmetic.maxPrice`. Priserne gemmes i databasen
+  og overskriver standardpriserne i `config.lua`.
 
-## Security notes
+Alle kald til computeren tjekker, at spilleren er inden for `Config.Computer.serverDistance` fra computeren på
+serveren. Det er ikke nok, at klienten siger det.
 
-- The server checks the job, distance, workshop, items, money and timing on every action. The
-  client only sends IDs and choices.
-- Item names, prices, amounts and timings come from `config.lua` on the server, never from the
-  client.
-- Plates are compared trimmed, and tuning can only be saved for vehicles in `owned_vehicles`.
-  Because the client controls a vehicle's plate, the server also checks the stored model and
-  that the owner is present before any swap or save.
-- Cosmetic values are range-checked per key (mod indexes, colours, tint, plate style, neon,
-  xenon) before they are saved.
-- Cosmetic saves only write the cosmetic keys, so performance levels cannot be changed through
-  the tuning menu.
-- Repeatable actions are rate-limited, and suspicious calls are logged with the prefix
-  `[ap1le_mechanicjob] suspicious:`.
-- ox_target `groups` is convenience only. The server re-checks the job on every call.
+## Fakturaer
 
-## Glassmorphism UI note
+- Mekanikeren åbner "Send faktura" fra F6-menuen. Dialogen viser de nærmeste spillere og en linje pr. prisregel,
+  med standardprisen udfyldt. Der kan tilføjes én ekstra linje. Linjer med 0 udelades.
+- Kunden får en bekræftelse med linjer, samlet beløb og en nedtælling. Svarer kunden ikke i tide, udløber fakturaen.
+- Når kunden betaler, går `Config.Invoice.societyShare` (standard 70 %) til virksomhedskontoen. Resten går til
+  mekanikerens bankkonto. Begge får besked. Betalte fakturaer gemmes i `ap1le_mechanicjob_invoices`.
+- Serveren tjekker totalen, antal linjer, afstanden og ventetiden. Klienten kan ikke ændre beløbene.
 
-The tuning menu and the invoice popup are NUI pages. FiveM draws the NUI as a transparent layer
-over the game, so `backdrop-filter` only blurs HTML behind the element, not the game world. The
-glass look comes from translucent layered gradients, a thin light border, an inner highlight, a
-soft shadow and a subtle noise texture. `backdrop-filter` is used between stacked HTML layers.
-The tuning panel sits on the right so the car stays visible. The invoice popup is compact and
-centred at the top.
+## Sikkerhed
 
-## Test checklist
+- Serveren tjekker job, grad, afstand, værksted, varer, penge og tid ved hvert kald. Klienten sender kun ID'er og valg.
+- Varenavne, priser, antal og tider kommer fra `config.lua` på serveren, aldrig fra klienten.
+- Kald der gentages, er begrænset i tid, og mistænkelige kald logges med præfikset `[ap1le_mechanicjob] suspicious:`.
+- Chefens programmer tjekker grad på serveren. ox_target's `groups` er kun for bekvemmelighed.
+- Lager- og værkstedskald tjekker serverside, at spilleren faktisk står i værkstedet eller ved computeren.
+- Tuning kan kun gemmes på køretøjer i `owned_vehicles`, og kun når ejeren er til stede eller har den rigtige
+  model. Skift af performance-dele er underlagt de samme regler.
+- Cosmetic-værdier kontrolleres for type og område, før de gemmes. Ved gem skrives kun de cosmetic-nøgler, så
+  performance-niveauer ikke kan ændres via tuning-menuen.
 
-Test with a mechanic and a customer, both with the mechanic job assigned, on a server with the
-dependencies above installed.
+## Test-tjekliste
 
-- [ ] Start the server with no errors in the console. Locales load (`en` and `da`).
-- [ ] A non-mechanic gets no mechanic options on vehicles and cannot start an action.
-- [ ] Workshop blips show on the map.
-- [ ] Engine repair in a workshop takes the kit, runs the animation and repairs the engine.
-- [ ] Engine repair outside a workshop is refused. Field repair works anywhere with a repair kit.
-- [ ] Body repair and tyre change work only in a workshop.
-- [ ] Engine swap: the old engine comes out (lifted out with the hoist), the new one goes in, and
-      the old part is in the mechanic's inventory.
-- [ ] Cancelling a swap mid-way (~INPUT_FRONTEND_CANCEL~) restores the old part visually and
-      keeps the items unchanged.
-- [ ] Each swap category works (brakes, transmission, suspension, armour, turbo) and the
-      level saved on an owned vehicle is applied after a restart.
-- [ ] Swapping to stock returns the part to the inventory (only for parts installed by this
-      resource; a part fitted elsewhere is removed without returning an item).
-- [ ] A swap or cosmetic save on someone else's car is refused when the owner is offline or
-      more than 30 m away.
-- [ ] Cosmetic changes preview live, are saved for owned vehicles, and are billed through an
-      invoice.
-- [ ] Unowned vehicles get the cosmetic preview, show the "not saved" message and are not saved.
-- [ ] Load a car onto the flatbed, drive the truck, and unload the car at the drop point.
-- [ ] Send an invoice to a nearby player. Accept it: the customer is charged, the society
-      account gets 70 percent and the mechanic's bank gets 30 percent. Both notifications show
-      the amounts as money (for example `$17,300`).
-- [ ] Decline an invoice, and let one expire. Both sides get notified.
-- [ ] Sending an invoice too far away, with too many lines, or with a total above the maximum is
-      refused.
-- [ ] Escape closes the tuning menu and the invoice creation form. The customer invoice popup
-      stays until accepted or declined.
-- [ ] The NUI layout works at narrow widths with no horizontal scroll.
-- [ ] Restart the resource: no leftover props, cameras, scaleforms or NUI focus.
+Test med en mekaniker og en kunde, begge med jobbet `mechanic`, på en server med afhængighederne installeret.
 
-## Screenshots
+- [ ] Serveren starter uden fejl, og sprogfilerne `da` og `en` indlæses.
+- [ ] En spiller uden jobbet ser ingen mekanikermuligheder og kan ikke starte en handling.
+- [ ] Værkstederne vises som blips på kortet.
+- [ ] Motorreparation i et værksted bruger sættet og reparerer motoren. Uden for værkstedet afvises den.
+      Reparation på stedet virker overalt med et reparationssæt.
+- [ ] Skift af en performance-del tager den nye del fra værkstedets lager, og den gamle del lægges i lageret.
+- [ ] Afbrydelse midt i et skift (X) stopper animationen og efterlader varerne uændrede.
+- [ ] Hvert niveau og hver kategori virker, og niveauet på et ejet køretøj er det samme efter genstart.
+- [ ] Et skift eller en gemning på et andet spillers bil afvises, når ejeren er offline eller mere end 30 m væk.
+- [ ] Tuning-panelet: træk for at dreje, rul for at zoome, kamerapresets, kurv og "Monter". Ikke-ejede køretøjer får
+      en besked om, at intet gemmes.
+- [ ] Bestilling af en vare uden lager fra tuning-menuen: virksomheden betales, og ordren vises under "Åbne bestillinger".
+- [ ] Efter leveringstiden står kassen ved leveringspunktet. Den kan pakkes ud, og varerne ligger i lageret.
+      Pakkes den ud, når lageret er fuldt, bliver den stående.
+- [ ] Computeren åbnes med animation, og alle programmer virker for en mekaniker. Chefens programmer er skjult for
+      almindelige mekanikere, og serveren afviser deres kald, selv hvis de sendes direkte.
+- [ ] Chefen kan ansætte en nærliggende spiller, ændre stilling og fyre. Stillinger over egen grad kan ikke ændres.
+- [ ] Chefen kan indsætte og hæve. Historikken viser fakturaer, ordrer og overførsler.
+- [ ] Prislisten gemmer ændringer, og en ugyldig pris afvises.
+- [ ] Bugsering: læs et køretøj op på flatbed'en, kør af sted og aflæs det på leveringspunktet.
+- [ ] Send en faktura til en spiller i nærheden. Accepter: kunden betales, virksomheden får 70 % og mekanikeren
+      30 %. Begge får en besked med beløbet.
+- [ ] Afvis en faktura, og lad en anden udløbe. Begge sider får besked.
+- [ ] En faktura for langt væk, med for mange linjer eller over det højeste beløb afvises.
+- [ ] Genstart resourcen: ingen spøgelsesprops, kameraer, computere eller NUI-fokus bliver tilbage.
 
-Rendered in Chromium with demo data (the car is a placeholder background, not the game).
+## Skærmbilleder
 
-| Performance | Cosmetic |
+Taget med demodata i Chromium (bilen er en placeholder, ikke spillet).
+
+**Tuning**
+
+| Ydelse (lager og bestil) | Underkategorier |
 |---|---|
-| ![](docs/screenshots/tuning-performance-1080.png) | ![](docs/screenshots/tuning-cosmetic-1080.png) |
-| **Paint** | **Extras** |
-| ![](docs/screenshots/tuning-paint-1080.png) | ![](docs/screenshots/tuning-extras-1080.png) |
-| **Create invoice** | **Customer invoice** |
-| ![](docs/screenshots/invoice-1080.png) | ![](docs/screenshots/popup-1080.png) |
+| ![](docs/screenshots/tuning-1080-01-performance.png) | ![](docs/screenshots/tuning-1080-04-sub.png) |
+| **Fælge pr. fælgtype** | **Alle farver, sorteret efter type** |
+| ![](docs/screenshots/tuning-1080-06-wheels.png) | ![](docs/screenshots/tuning-1080-08-colour-metallic.png) |
+| **Kurv** | |
+| ![](docs/screenshots/tuning-1080-14-cart.png) | |
+
+**Chefens computer**
+
+| Skrivebord | Bestil |
+|---|---|
+| ![](docs/screenshots/laptop-1080-01-desktop.png) | ![](docs/screenshots/laptop-1080-03-order.png) |
+| **Ordrer** | **Personale** |
+| ![](docs/screenshots/laptop-1080-04-orders.png) | ![](docs/screenshots/laptop-1080-05-staff.png) |
+| **Økonomi** | **Prisliste** |
+| ![](docs/screenshots/laptop-1080-06-eco.png) | ![](docs/screenshots/laptop-1080-07-prices.png) |
+

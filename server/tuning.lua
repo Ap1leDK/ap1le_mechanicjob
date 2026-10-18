@@ -1,5 +1,6 @@
 -- ap1le_mechanicjob: cosmetic tuning (open check + saving cosmetic props).
 -- Saving merges only whitelisted cosmetic keys into the stored JSON; performance keys always stay as stored.
+-- Key names and value shapes follow ox_lib's lib.getVehicleProperties / lib.setVehicleProperties.
 
 -- Value checks, matching what lib.getVehicleProperties produces and the game setters accept.
 -- Each returns a clean copy of the value, or nil if it is not allowed.
@@ -49,6 +50,11 @@ local validators = {
     color2 = paint,
     pearlescentColor = colourIndex,
     wheelColor = colourIndex,
+    interiorColor = colourIndex,
+    dashboardColor = colourIndex,
+    -- GetVehicleModColor_1/2 paint type (metallic, classic, pearl, matte, metals, chrome, chameleon ...)
+    paintType1 = function(v) return int(v, 0, 10) end,
+    paintType2 = function(v) return int(v, 0, 10) end,
     wheels = function(v) return int(v, 0, 12) end,
     -- Upper bounds leave room for added tints/plate styles (the client lists GetNum* options)
     windowTint = function(v) return int(v, -1, 12) end,
@@ -64,10 +70,13 @@ local validators = {
         return copy
     end,
     neonColor = rgb,
+    tyreSmokeColor = rgb,
+    modSmokeEnabled = bool,
     modXenon = bool,
     modCustomTiresF = bool,
     modCustomTiresR = bool,
     modLivery = modIndex,
+    livery = function(v) return int(v, -1, 255) end, -- GetVehicleLivery, -1 = none
 }
 
 -- Every configured cosmetic mod id is a GTA mod index
@@ -95,11 +104,52 @@ local function checkAccess(source, netId, action)
     return vehicle, Mechanic.EntityPlate(vehicle)
 end
 
+-- Every performance part item, for the stock counts sent with tuning:canOpen
+local performanceItems = {}
+do
+    local seen = {}
+    for _, cfg in pairs(Config.Performance) do
+        for i = 1, #cfg.levels do
+            local item = cfg.levels[i]
+            if not seen[item] then
+                seen[item] = true
+                performanceItems[#performanceItems + 1] = item
+            end
+        end
+    end
+    table.sort(performanceItems)
+end
+
+---{ [item] = count } in the stash for every performance part (0 when missing).
+---@param stashId string
+---@return table
+local function performanceStock(stashId)
+    local stock = {}
+    local counts = #performanceItems > 0 and exports.ox_inventory:Search(stashId, 'count', performanceItems)
+
+    for i = 1, #performanceItems do
+        local item = performanceItems[i]
+        local count
+        if type(counts) == 'table' then
+            count = counts[item]
+        elseif type(counts) == 'number' and #performanceItems == 1 then
+            count = counts
+        end
+        stock[item] = math.tointeger(tonumber(count) or 0) or 0
+    end
+
+    return stock
+end
+
 lib.callback.register('ap1le_mechanicjob:tuning:canOpen', function(source, netId)
     if not Mechanic.RateLimit(source, 'tuning:canOpen', 1000) then return false, 'too_fast' end
 
     local vehicle, plate = checkAccess(source, netId, 'tuning:canOpen')
     if not vehicle then return false, plate end
+
+    -- checkAccess confirmed the player is inside a workshop
+    local workshop = Mechanic.PlayerWorkshop(source)
+    if not workshop then return false, 'not_in_workshop' end
 
     local levels = {}
     local owned = plate and Mechanic.FetchOwned(plate)
@@ -112,7 +162,16 @@ lib.callback.register('ap1le_mechanicjob:tuning:canOpen', function(source, netId
         end
     end
 
-    return true, { owned = owned ~= nil, levels = levels }
+    -- The DB query yielded: the player must still be in that workshop
+    if Mechanic.PlayerWorkshop(source) ~= workshop then return false, 'not_in_workshop' end
+
+    return true, {
+        owned = owned ~= nil,
+        levels = levels,
+        stock = performanceStock(Mechanic.StashId(workshop)),
+        prices = Mechanic.GetPrices(),
+        workshop = workshop.id,
+    }
 end)
 
 lib.callback.register('ap1le_mechanicjob:tuning:save', function(source, netId, props)

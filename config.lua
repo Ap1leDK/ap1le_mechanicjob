@@ -97,6 +97,14 @@ Config.Shop = {
     maxPerLine = 20,              -- max units of one item per order
     maxLines = 15,                -- max different items per order
     maxOpenOrders = 5,            -- per workshop (ordered or waiting for pickup)
+    -- Limits for mechanics below Config.BossGrade, so a new hire cannot empty the company account.
+    -- The chef always uses the limits above.
+    staffLimits = {
+        maxLines = 1,             -- different items per order
+        maxPerLine = 2,           -- units of that item
+        maxTotal = 30000,         -- order total
+        maxOpen = 2,              -- own open orders at a time
+    },
     crateModel = `prop_box_wood05a`,
     items = {
         repair_kit = 400, engine_repair_kit = 900, body_repair_kit = 900, tyre = 250,

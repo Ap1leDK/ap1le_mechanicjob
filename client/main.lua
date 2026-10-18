@@ -1,10 +1,12 @@
 -- ap1le_mechanicjob: client core.
--- Global `Mechanic` helpers, job tracking, workshop blips, ox_target registration, F6 menu,
--- notify event and the NUI locale callback. Feature handlers live in repair/tuning/billing/towing.lua.
+-- Global `Mechanic` helpers, job tracking, workshop blips, vehicle ox_target options, the F6 job menu
+-- (ap1le_core menu) and the NUI locale callback. Feature handlers live in repair/tuning/billing/towing/
+-- stock/computer.lua. All notifications go through ap1le_core (Ap1le.Notify).
 
 Mechanic = {}
 
 local MENU_ID = 'ap1le_mechanicjob_menu'
+local ORDERS_MENU_ID = 'ap1le_mechanicjob_orders'
 
 local blips = {}
 local targetsRegistered = false
@@ -35,15 +37,17 @@ end)
 RegisterNetEvent('esx:onPlayerLogout', function()
     ESX.PlayerData = {}
     if Tuning and Tuning.Close then Tuning.Close(true) end
+    if Computer and Computer.Close then Computer.Close() end
 end)
 
 RegisterNetEvent('esx:setJob', function(job)
     ESX.PlayerData = ESX.PlayerData or {}
     ESX.PlayerData.job = job
 
-    -- Lost the job while the tuning screen was open: close it and revert the preview
-    if job and job.name ~= Config.Job and Tuning and Tuning.Close then
-        Tuning.Close(true)
+    -- Lost the job while the tuning screen or the computer was open: close it (tuning reverts the preview)
+    if job and job.name ~= Config.Job then
+        if Tuning and Tuning.Close then Tuning.Close(true) end
+        if Computer and Computer.Close then Computer.Close() end
     end
 end)
 
@@ -55,6 +59,14 @@ end)
 function Mechanic.IsMechanic()
     local data = ESX.PlayerData
     return data ~= nil and data.job ~= nil and data.job.name == Config.Job
+end
+
+---Chef: job grade >= Config.BossGrade (the server re-checks every chef call).
+---@return boolean
+function Mechanic.IsBoss()
+    if not Mechanic.IsMechanic() then return false end
+    local grade = tonumber(ESX.PlayerData.job.grade)
+    return grade ~= nil and grade >= Config.BossGrade
 end
 
 ---@return vector3
@@ -126,23 +138,36 @@ function Mechanic.RequestControl(entity, timeout)
 end
 
 -- ---------------------------------------------------------------------------
--- Notify
+-- Text helpers (shared with billing/stock/computer.lua)
 -- ---------------------------------------------------------------------------
 
-RegisterNetEvent('ap1le_mechanicjob:notify', function(msg, nType)
-    if type(msg) ~= 'string' then return end
-    UI.Notify(msg, nType or 'inform')
-end)
+---Locale text for a server error key (callbacks return `false, key`).
+---@param err any
+---@return string
+function Mechanic.ErrorText(err)
+    if type(err) == 'string' and err ~= '' then return locale(err) end
+    return locale('error')
+end
+
+---Money as shown in notifications and dialogs, e.g. $17,300 (digit grouping follows the ESX locale).
+---@param amount any
+---@return string
+function Mechanic.FormatMoney(amount)
+    amount = tonumber(amount) or 0
+    local ok, grouped = pcall(function() return ESX.Math.GroupDigits(amount) end)
+    return '$' .. ((ok and type(grouped) == 'string') and grouped or tostring(amount))
+end
 
 -- ---------------------------------------------------------------------------
 -- NUI locale
 -- ---------------------------------------------------------------------------
 
+-- Keys starting with ui_ (tuning NUI) and pc_ (laptop NUI)
 RegisterNUICallback('locale', function(_, cb)
     local out = {}
 
     for key, text in pairs(lib.getLocales()) do
-        if type(key) == 'string' and key:sub(1, 3) == 'ui_' then
+        if type(key) == 'string' and (key:sub(1, 3) == 'ui_' or key:sub(1, 3) == 'pc_') then
             out[key] = text
         end
     end
@@ -289,13 +314,77 @@ local function registerTargets()
 end
 
 -- ---------------------------------------------------------------------------
--- F6 job menu
+-- F6 job menu (ap1le_core menu)
 -- ---------------------------------------------------------------------------
+
+local ORDER_ICONS = { ordered = 'truck-fast', arrived = 'box-open' }
+
+---One order of order:list as a read-only menu row (no action = information only).
+local function orderRow(order)
+    local parts = {}
+    if type(order.items) == 'table' then
+        for i = 1, #order.items do
+            local line = order.items[i]
+            if type(line) == 'table' then
+                parts[#parts + 1] = ('%dx %s'):format(math.tointeger(tonumber(line.count)) or 0, tostring(line.label or line.item or '?'))
+            end
+        end
+    end
+
+    local desc = locale('order_row_desc', table.concat(parts, ', '), Mechanic.FormatMoney(order.total))
+
+    if order.status == 'ordered' and tonumber(order.eta) then
+        desc = desc .. ' · ' .. locale('order_eta', math.max(1, math.ceil(tonumber(order.eta) / 60)))
+    end
+
+    return {
+        title = locale('order_row_title', tostring(order.id), locale('order_status_' .. tostring(order.status))),
+        description = desc,
+        icon = ORDER_ICONS[order.status] or 'box',
+    }
+end
+
+---Open orders of the player's workshop as a sub menu of the F6 menu.
+local function showOrders()
+    CreateThread(function()
+        local ok, orders = lib.callback.await('ap1le_mechanicjob:order:list', false)
+
+        if not ok then
+            Ap1le.Notify(Mechanic.ErrorText(orders), 'error')
+            return
+        end
+
+        local options = {}
+
+        if type(orders) == 'table' then
+            for i = 1, #orders do
+                local order = orders[i]
+                if type(order) == 'table' and (order.status == 'ordered' or order.status == 'arrived') then
+                    options[#options + 1] = orderRow(order)
+                end
+            end
+        end
+
+        if #options == 0 then
+            options[1] = { title = locale('order_none'), icon = 'inbox' }
+        end
+
+        -- Register right before showing (the menu is copied and core forgets menus when it restarts)
+        Ap1le.RegisterMenu({
+            id = ORDERS_MENU_ID,
+            title = locale('menu_orders'),
+            menu = MENU_ID,
+            options = options,
+        })
+        Ap1le.ShowMenu(ORDERS_MENU_ID)
+    end)
+end
 
 function Mechanic.OpenMenu()
     if not Mechanic.IsMechanic() or Anim.IsBusy() then return end
 
-    lib.registerContext({
+    -- The orders sub menu points back to this one, so it is registered again every time
+    Ap1le.RegisterMenu({
         id = MENU_ID,
         title = locale('menu_title'),
         options = {
@@ -303,7 +392,7 @@ function Mechanic.OpenMenu()
                 title = locale('menu_invoice'),
                 icon = 'file-invoice-dollar',
                 onSelect = function()
-                    Billing.OpenCreate()
+                    CreateThread(function() Billing.OpenCreate() end)
                 end,
             },
             {
@@ -313,17 +402,24 @@ function Mechanic.OpenMenu()
                     local vehicle = Mechanic.GetTargetVehicle()
 
                     if not vehicle then
-                        UI.Notify(locale('too_far'), 'error')
+                        Ap1le.Notify(locale('too_far'), 'error')
                         return
                     end
 
                     Repair.Start(vehicle, 'field')
                 end,
             },
+            {
+                title = locale('menu_orders'),
+                icon = 'boxes-stacked',
+                onSelect = showOrders,
+            },
         },
     })
 
-    lib.showContext(MENU_ID)
+    CreateThread(function()
+        Ap1le.ShowMenu(MENU_ID)
+    end)
 end
 
 lib.addKeybind({
@@ -344,6 +440,17 @@ CreateThread(function()
     registerTargets()
 end)
 
+-- ox_target forgets everything when it restarts
+AddEventHandler('onClientResourceStart', function(resource)
+    if resource ~= 'ox_target' then return end
+
+    CreateThread(function()
+        Wait(500)
+        targetsRegistered = false
+        registerTargets()
+    end)
+end)
+
 AddEventHandler('onResourceStop', function(resource)
     if resource ~= GetCurrentResourceName() then return end
 
@@ -355,9 +462,11 @@ AddEventHandler('onResourceStop', function(resource)
     end
     blips = {}
 
-    pcall(function() lib.hideContext(false) end)
+    pcall(function()
+        local open = Ap1le.GetOpenMenu()
+        if open == MENU_ID or open == ORDERS_MENU_ID then Ap1le.HideMenu() end
+    end)
 
-    -- Camera, freeze state and preview are cleaned by Tuning's own stop handler;
-    -- make sure the mouse is never left captured by a dead NUI.
-    SetNuiFocus(false, false)
+    -- Camera, freeze state and preview are cleaned by Tuning's own stop handler, the laptop's focus and
+    -- camera by Computer's, so no SetNuiFocus here (it would also drop focus of other resources' dialogs).
 end)

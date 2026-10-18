@@ -1,6 +1,7 @@
 -- ap1le_mechanicjob: performance part swaps (engine, brakes, transmission, suspension, armor, turbo).
 -- A swap is two physical steps on the client (remove old part, install new part). The server reads the
 -- current level from owned_vehicles, enforces the combined minimum time, moves the items and saves the level.
+-- Parts come from the stash of the workshop the mechanic is in, and the old part goes back into it.
 
 ---True if another player already has a pending swap on this plate (prevents parallel swaps that
 ---would both return the same old part).
@@ -13,8 +14,9 @@ local function plateBusy(source, plate)
     return false
 end
 
-local function hasItem(source, item)
-    local count = exports.ox_inventory:Search(source, 'count', item)
+---True if the stash holds at least one of the item.
+local function stashHas(stashId, item)
+    local count = exports.ox_inventory:Search(stashId, 'count', item)
     return type(count) == 'number' and count >= 1
 end
 
@@ -42,7 +44,9 @@ lib.callback.register('ap1le_mechanicjob:perf:begin', function(source, netId, ca
         return false, err or 'too_far'
     end
 
-    if not Mechanic.PlayerWorkshop(source) then return false, 'not_in_workshop' end
+    local workshop = Mechanic.PlayerWorkshop(source)
+    if not workshop then return false, 'not_in_workshop' end
+    local stashId = Mechanic.StashId(workshop)
 
     local plate = Mechanic.EntityPlate(vehicle)
     if not plate then return false, 'not_owned' end
@@ -65,7 +69,7 @@ lib.callback.register('ap1le_mechanicjob:perf:begin', function(source, netId, ca
     -- (out-of-range value, no record, or a different record) the swap is allowed without an item.
     local oldItem = nil
     if oldLevel > 0 and inRange then
-        local recorded = Mechanic.GetInstalledLevel(plate, category)
+        local recorded = Mechanic.GetInstalledLevel(plate, category, Mechanic.ModelHash(vehicle))
         if recorded == oldLevel then
             oldItem = cfg.levels[oldLevel]
         elseif recorded ~= nil then
@@ -74,12 +78,15 @@ lib.callback.register('ap1le_mechanicjob:perf:begin', function(source, netId, ca
         end
     end
 
-    if newItem and not hasItem(source, newItem) then return false, 'missing_item' end
-    if oldItem and not exports.ox_inventory:CanCarryItem(source, oldItem, 1) then return false, 'cant_carry' end
+    if newItem and not stashHas(stashId, newItem) then return false, 'stock_missing' end
+    if oldItem and not exports.ox_inventory:CanCarryItem(stashId, oldItem, 1) then return false, 'stock_full' end
 
     -- The DB query yielded: re-check state that may have changed meanwhile
     if Mechanic.GetPending(source) then return false, 'busy' end
     if plateBusy(source, plate) then return false, 'busy' end
+    -- Another mechanic's finish may be writing this plate right now: the row read above is stale then
+    if not Mechanic.LockPlate(plate) then return false, 'busy' end
+    Mechanic.UnlockPlate(plate)
 
     local removeTime = oldLevel > 0 and cfg.removeTime or 0
     local installTime = level > 0 and cfg.installTime or 0
@@ -94,6 +101,8 @@ lib.callback.register('ap1le_mechanicjob:perf:begin', function(source, netId, ca
         oldItem = oldItem,
         newItem = newItem,
         plate = plate,
+        workshop = workshop.id,
+        stashId = stashId,
         minMs = math.floor(expected * Config.MinTimeFactor),
         expectedMs = expected,
     })
@@ -106,13 +115,18 @@ lib.callback.register('ap1le_mechanicjob:perf:begin', function(source, netId, ca
     }
 end)
 
----Give the old part back; if it no longer fits, drop it next to the mechanic instead of losing it.
+---Put the old part back in the workshop stash; if it no longer fits there, give it to the mechanic,
+---and if that fails too, drop it next to the mechanic instead of losing it.
 local function giveOldPart(source, pending, state)
     if not pending.oldItem or state.gaveOld then return end
     state.gaveOld = true
 
-    local added = exports.ox_inventory:AddItem(source, pending.oldItem, 1)
-    if added then return end
+    if exports.ox_inventory:AddItem(pending.stashId, pending.oldItem, 1) then return end
+
+    print(('[ap1le_mechanicjob] stash "%s" did not accept the old %s (plate "%s"), giving it to the mechanic')
+        :format(pending.stashId, pending.oldItem, pending.plate))
+
+    if exports.ox_inventory:AddItem(source, pending.oldItem, 1) then return end
 
     local ped = GetPlayerPed(source)
     if ped and ped ~= 0 and DoesEntityExist(ped) then
@@ -122,25 +136,29 @@ local function giveOldPart(source, pending, state)
         if dropId then return end
     end
 
-    print(('[ap1le_mechanicjob] could not return %s to player %s (plate "%s")'):format(pending.oldItem, tostring(source), pending.plate))
+    print(('[ap1le_mechanicjob] could not return %s to stash "%s" or player %s (plate "%s")')
+        :format(pending.oldItem, pending.stashId, tostring(source), pending.plate))
 end
 
 ---Undo whatever a failed swap already did, so nothing is lost or duplicated.
----Before the DB save: refund the new part. After the DB save: the swap stands, so make sure the
----old part is handed out.
+---Before the DB save: put the new part back in the stash. After the DB save: the swap stands, so make
+---sure the old part is handed out.
 local function rollback(source, pending, state)
     if state.saved then
         giveOldPart(source, pending, state)
         return
     end
     if state.removedNew then
-        exports.ox_inventory:AddItem(source, pending.newItem, 1)
         state.removedNew = false
+        if not exports.ox_inventory:AddItem(pending.stashId, pending.newItem, 1)
+            and not exports.ox_inventory:AddItem(source, pending.newItem, 1) then
+            print(('[ap1le_mechanicjob] could not refund %s to stash "%s" or player %s'):format(pending.newItem, pending.stashId, tostring(source)))
+        end
     end
 end
 
 ---Moves the items and saves the new level. Runs while the plate is locked.
----Order: take the new part, save the DB, record the install, then give the old part. Nothing is
+---Order: take the new part, save the level and the install record together, then give the old part. Nothing is
 ---handed out before the save succeeds, so a failed or yielding save can never duplicate a part.
 ---@return boolean ok
 ---@return any data
@@ -150,10 +168,17 @@ local function applySwap(source, cfg, pending, state, vehicle)
     if owned == false then return false, 'error' end
     if not owned then return false, 'not_owned' end
 
-    local currentLevel = Mechanic.LevelFromProps(cfg, owned.props)
+    local currentLevel, inRange = Mechanic.LevelFromProps(cfg, owned.props)
     if currentLevel ~= pending.oldLevel then return false, 'error' end
 
-    -- The DB query yielded: the player must still be connected and a mechanic
+    if not DoesEntityExist(vehicle) then return false, 'error' end
+    local model = Mechanic.ModelHash(vehicle)
+
+    -- Re-read the install record too: another swap on this plate may have finished since begin, so the
+    -- part decided at begin can be stale. Only return a part this resource recorded installing.
+    local recorded = Mechanic.GetInstalledLevel(pending.plate, pending.category, model)
+
+    -- The DB queries yielded: the player must still be connected and a mechanic
     if not Mechanic.GetMechanic(source) then return false, 'not_mechanic' end
     if not DoesEntityExist(vehicle) then return false, 'error' end
 
@@ -161,31 +186,31 @@ local function applySwap(source, cfg, pending, state, vehicle)
     local access, accessErr = Mechanic.CheckOwnedVehicle(source, vehicle, owned)
     if not access then return false, accessErr end
 
-    -- 1) Take the new part (synchronous)
+    local oldItem = (currentLevel > 0 and inRange and recorded == currentLevel) and cfg.levels[currentLevel] or nil
+    if oldItem ~= pending.oldItem then
+        Mechanic.Flag(source, ('perf:finish on "%s": %s part to return changed since begin (%s -> %s)')
+            :format(pending.plate, pending.category, tostring(pending.oldItem), tostring(oldItem)))
+        pending.oldItem = oldItem
+    end
+
+    -- 1) Take the new part from the workshop stash (synchronous)
     if pending.newItem then
-        local removed = exports.ox_inventory:RemoveItem(source, pending.newItem, 1)
-        if removed ~= true then return false, 'missing_item' end
+        local removed = exports.ox_inventory:RemoveItem(pending.stashId, pending.newItem, 1)
+        if removed ~= true then return false, 'stock_missing' end
         state.removedNew = true
     end
 
-    -- 2) Save the new level, keeping every other stored property
+    -- 2) Save the new level (keeping every other stored property) and the server-only install record,
+    --    used to decide whether a later removal returns a part, in one transaction
     owned.props[cfg.propKey] = Mechanic.PropsValueForLevel(cfg, pending.level)
 
-    local affected = MySQL.update.await('UPDATE owned_vehicles SET vehicle = ? WHERE plate = ?', {
-        json.encode(owned.props), owned.plate,
-    })
-
-    if not affected or affected < 1 then
+    if not Mechanic.SaveSwap(owned.plate, owned.props, pending.plate, pending.category, pending.level, model) then
         rollback(source, pending, state)
-        print(('[ap1le_mechanicjob] failed to save %s level for plate "%s"'):format(pending.category, pending.plate))
         return false, 'error'
     end
     state.saved = true
 
-    -- 3) Server-only install record, used to decide whether a later removal returns a part
-    Mechanic.SetInstalledLevel(pending.plate, pending.category, pending.level)
-
-    -- 4) Give back the old part (dropped on the ground if it no longer fits)
+    -- 3) Put the old part in the stash (mechanic / ground as fallbacks)
     giveOldPart(source, pending, state)
 
     return true, { category = pending.category, level = pending.level }
@@ -220,7 +245,9 @@ lib.callback.register('ap1le_mechanicjob:perf:finish', function(source)
     local vehicle, err = Mechanic.GetVehicle(source, pending.netId)
     if not vehicle then return false, err == 'error' and 'error' or 'too_far' end
 
-    if not Mechanic.PlayerWorkshop(source) then return false, 'not_in_workshop' end
+    -- Must still be in the workshop whose stash the swap was checked against
+    local workshop = Mechanic.PlayerWorkshop(source)
+    if not workshop or workshop.id ~= pending.workshop then return false, 'not_in_workshop' end
 
     if Mechanic.EntityPlate(vehicle) ~= pending.plate then
         Mechanic.Flag(source, 'perf:finish plate changed during swap')
