@@ -9,8 +9,8 @@
 -- loads shared accounts only when they start. Until then hiring/promoting (unknown job grade), ordering
 -- parts and the computer's deposit/withdraw (society account not found) fail.
 --
--- Grade 3 is named 'boss' on purpose: esx_society only lets grades whose NAME is in its
--- Config.BossGrades (default 'boss') withdraw from the society.
+-- Grade 3 is named 'boss' so ESX's own boss menus (esx_society, Config.BossGrades) treat it as the boss.
+-- This resource's chef apps use Config.BossGrade (the grade number) instead.
 
 -- 1) Job
 INSERT IGNORE INTO `jobs` (`name`, `label`, `whitelisted`) VALUES

@@ -3,9 +3,13 @@
  * Lua -> NUI:  laptop:open { name, grade, gradeLabel, isBoss, workshop, shop }, laptop:close {}
  * NUI -> Lua:  laptop:request { method, args } -> { ok, data, error }, laptop:close {}
  *
- * A MacBook-style desktop: menu bar, dock with magnification, draggable windows, and the apps
+ * A MacBook desktop in ap1le_core's design language: menu bar, dock, draggable windows, and the apps
  * Lager, Bestil, Ordrer (everyone) plus Personale, Okonomi, Prisliste (chef only; the server
  * re-checks every call). All dynamic text goes through textContent (App.el).
+ * Look (v3): one accent (ap1le_core's --brand), monochrome icons in grey circles, status colours only
+ * as a small dot next to a word. See css/laptop.css.
+ * Errors: the text Lua sends (`error`, the server's/esx_society's reason) is shown as is. If the locale
+ * has no text for the key (`error` === `code`), the Danish fallback below is used.
  * Chrome 103: no :has(), color-mix(), nesting.
  */
 (function () {
@@ -30,14 +34,14 @@
         pc_app_prices: 'Prisliste', // Price list (app)
         pc_desktop: 'Skrivebord', // Desktop (app name in the menu bar when no window is focused)
         pc_menu_about: 'Om denne computer', // About this computer
-        pc_menu_close_pc: 'Luk computer', // Shut down / close the computer
+        pc_menu_close_pc: 'Luk computeren', // Close the computer
         pc_menu_apps: 'Programmer', // Apps (menu)
         pc_menu_window: 'Vindue', // Window (menu)
         pc_menu_refresh: 'Opdater', // Refresh
-        pc_menu_minimize: 'Minimér', // Minimise
+        pc_menu_minimize: 'Minimer', // Minimise
         pc_menu_zoom: 'Zoom', // Zoom
         pc_menu_close_win: 'Luk vindue', // Close window
-        pc_menu_minimize_all: 'Minimér alle', // Minimise all
+        pc_menu_minimize_all: 'Minimer alle', // Minimise all
         pc_menu_close_all: 'Luk alle vinduer', // Close all windows
         pc_menu_no_windows: 'Ingen åbne vinduer', // No open windows
         pc_about_title: 'Værkstedscomputer', // Workshop computer
@@ -48,15 +52,15 @@
         pc_refresh: 'Opdater', // Refresh (tooltip)
         pc_search: 'Søg', // Search (placeholder)
         pc_err_generic: 'Noget gik galt. Prøv igen.', // Something went wrong. Try again.
-        pc_err_network: 'Ingen forbindelse til serveren.', // No connection to the server.
-        pc_widget_orders: 'Ordrer undervejs', // Orders on the way (desktop widget)
+        pc_err_network: 'Computeren fik ikke svar. Prøv igen.', // The computer got no answer. Try again.
+        pc_widget_orders: 'Undervejs', // Orders on the way (desktop widget)
         pc_widget_balance: 'Firmakonto', // Society balance (desktop widget)
         pc_widget_ready: 'Klar til afhentning', // Crates ready for pickup (desktop widget)
         pc_filter_all: 'Alle varer', // All items
         pc_filter_in: 'På lager', // In stock
         pc_filter_low: 'Lav beholdning', // Low stock
-        pc_filter_out: 'Mangler', // Out of stock
-        pc_side_stock: 'Lager', // Stock (sidebar section)
+        pc_filter_out: 'Ikke på lager', // Out of stock
+        pc_side_stock: 'Beholdning', // Stock level (sidebar section)
         pc_side_categories: 'Kategorier', // Categories (sidebar section)
         pc_cat_repair: 'Reparation', // Repair (category)
         pc_cat_engine: 'Motor', // Engine (category)
@@ -76,86 +80,89 @@
         pc_stock_summary: '%s varer · %s stk. på lager', // N items · N pcs in stock
         pc_in_stock: '%s på lager', // N in stock
         pc_out_of_stock: 'Ikke på lager', // Not in stock
-        pc_low_stock: 'Lav beholdning', // Low stock (badge)
+        pc_low_stock: 'Lav beholdning', // Low stock
         pc_add_cart: 'Læg i kurv', // Add to cart
         pc_cart: 'Kurv', // Cart
-        pc_cart_empty: 'Kurven er tom.', // The cart is empty.
+        pc_cart_empty: 'Kurven er tom. Vælg dele i kataloget.', // The cart is empty. Pick parts in the catalog.
         pc_cart_clear: 'Tøm', // Clear (cart)
         pc_cart_remove: 'Fjern', // Remove (tooltip)
         pc_total: 'I alt', // Total
-        pc_society_pays: 'Firmakontoen betaler', // The society account pays
-        pc_delivery_eta: 'Leveres om ca. %s min', // Delivered in about N min
+        pc_society_pays: 'Betales af firmakontoen.', // Paid from the society account.
+        pc_delivery_eta: 'Leveres om ca. %s min.', // Delivered in about N min.
         pc_place_order: 'Bestil', // Place order (button)
-        pc_ordering: 'Bestiller...', // Ordering...
-        pc_order_placed: 'Ordre #%s afgivet: %s. Leveres om ca. %s min.', // Order #N placed: $X. Delivered in about N min.
+        pc_ordering: 'Bestiller …', // Ordering …
+        pc_order_placed: 'Ordre #%s er bestilt for %s. Leveres om ca. %s min.', // Order #N placed for $X. Delivered in about N min.
         pc_max_lines: 'Højst %s forskellige varer pr. ordre.', // At most N different items per order.
         pc_max_qty: 'Højst %s stk. pr. vare.', // At most N pieces per item.
-        pc_catalog_empty: 'Ingen varer i kataloget.', // No items in the catalog.
+        pc_catalog_empty: 'Ingen varer matcher.', // No items match.
         pc_orders_all: 'Alle', // All (orders filter)
         pc_st_ordered: 'Undervejs', // On the way (order status)
         pc_st_arrived: 'Klar til afhentning', // Ready for pickup (order status)
         pc_st_collected: 'Afhentet', // Collected (order status)
-        pc_orders_empty: 'Ingen ordrer endnu.', // No orders yet.
+        pc_orders_empty: 'Ingen ordrer her.', // No orders here.
         pc_order_no: 'Ordre #%s', // Order #N
         pc_order_by: 'af %s', // by NAME
         pc_order_arrives: 'Ankommer om %s', // Arrives in M:SS
-        pc_order_arriving: 'Ankommer snart...', // Arriving soon...
-        pc_order_ready: 'Kassen står ved leveringspunktet. Pak den ud i lageret.', // The crate is at the delivery point. Unpack it into the stock.
+        pc_order_arriving: 'Ankommer snart', // Arriving soon
+        pc_order_ready: 'Kassen står ved leveringspladsen. Pak den ud, så delene kommer på lager.', // The crate is at the delivery spot. Unpack it to put the parts in stock.
         pc_staff_all: 'Alle', // All (staff filter)
         pc_staff_online: 'Online', // Online
         pc_staff_offline: 'Offline', // Offline
         pc_staff_hire: 'Ansæt', // Hire
         pc_staff_group: 'Medarbejdere', // Employees (sidebar section)
-        pc_staff_empty: 'Ingen medarbejdere.', // No employees.
+        pc_staff_nearby: 'I nærheden', // Nearby (sidebar item: people who can be hired)
+        pc_staff_empty: 'Ingen medarbejdere her.', // No employees here.
         pc_staff_you: 'Dig', // You
         pc_staff_fire: 'Fyr', // Fire
-        pc_staff_locked: 'Kan ikke ændres', // Cannot be changed
+        pc_staff_locked: 'Samme eller højere stilling end dig', // Same or higher rank than you (cannot be changed)
         pc_staff_grade: 'Stilling', // Rank
         pc_fire_title: 'Fyr %s?', // Fire NAME?
-        pc_fire_text: '%s mister adgang til værkstedet og bliver arbejdsløs. Det kan ikke fortrydes.', // NAME loses access to the workshop and becomes unemployed. This cannot be undone.
-        pc_nearby_empty: 'Ingen i nærheden af computeren.', // Nobody near the computer.
-        pc_nearby_hint: 'Spillere inden for rækkevidde af computeren, som endnu ikke er mekanikere.', // Players within range of the computer who are not mechanics yet.
+        pc_fire_text: '%s mister jobbet som mekaniker med det samme. Det kan ikke fortrydes.', // NAME loses the mechanic job right away. This cannot be undone.
+        pc_nearby_empty: 'Ingen i nærheden. Bed personen stille sig ved computeren.', // Nobody nearby. Ask the person to stand by the computer.
+        pc_nearby_hint: 'Personer ved computeren, som ikke er mekanikere.', // People at the computer who are not mechanics.
         pc_hire_btn: 'Ansæt', // Hire (button)
         pc_hired: '%s er ansat.', // NAME has been hired.
-        pc_hire_waiting: 'Venter på svar fra %s...', // Waiting for NAME to answer...
+        pc_hire_waiting: 'Venter på svar fra %s …', // Waiting for NAME to answer …
         pc_fired: '%s er fyret.', // NAME has been fired.
-        pc_grade_set: 'Stilling opdateret.', // Rank updated.
+        pc_grade_set: 'Stillingen er ændret.', // The rank has been changed.
         pc_server_id: 'ID %s', // ID N
-        pc_eco_title: 'Firmakontoen', // The society account
+        pc_eco_title: 'Firmakonto', // Society account
         pc_eco_income: 'Indtægter', // Income
         pc_eco_expense: 'Udgifter', // Expenses
-        pc_eco_transfer: 'Overfør penge', // Transfer money
+        pc_eco_period: 'Seneste %s posteringer', // Last N entries (caption under income/expenses)
+        pc_eco_transfer: 'Overfør', // Transfer
         pc_eco_amount: 'Beløb', // Amount
         pc_eco_deposit: 'Indsæt', // Deposit
         pc_eco_withdraw: 'Hæv', // Withdraw
+        pc_eco_cash_hint: 'Pengene flyttes mellem din bankkonto og firmakontoen.', // The money moves between your cash and the society account.
         pc_eco_history: 'Historik', // History
-        pc_eco_empty: 'Ingen posteringer endnu.', // No transactions yet.
-        pc_eco_bad_amount: 'Indtast et helt beløb på mindst $1.', // Enter a whole amount of at least $1.
+        pc_eco_empty: 'Ingen posteringer her.', // No entries here.
+        pc_eco_bad_amount: 'Skriv et helt beløb på mindst $1.', // Enter a whole amount of at least $1.
         pc_eco_max: 'Højst %s pr. overførsel.', // At most X per transfer.
-        pc_eco_done_deposit: '%s indsat i firmakontoen.', // X deposited into the society account.
-        pc_eco_done_withdraw: '%s hævet fra firmakontoen.', // X withdrawn from the society account.
+        pc_eco_done_deposit: '%s er indsat på firmakontoen.', // X deposited into the society account.
+        pc_eco_done_withdraw: '%s er hævet fra firmakontoen.', // X withdrawn from the society account.
         pc_eco_all: 'Alle', // All (history filter)
         pc_eco_invoices: 'Fakturaer', // Invoices (history filter)
         pc_eco_orders: 'Bestillinger', // Orders (history filter)
         pc_eco_transfers: 'Overførsler', // Transfers (history filter)
         pc_eco_t_invoice: 'Faktura', // Invoice (history type)
         pc_eco_t_order: 'Bestilling', // Order (history type)
-        pc_eco_t_deposit: 'Indsæt', // Deposit (history type)
-        pc_eco_t_withdraw: 'Hævning', // Withdrawal (history type)
+        pc_eco_t_deposit: 'Indsat', // Deposited (history type)
+        pc_eco_t_withdraw: 'Hævet', // Withdrawn (history type)
         pc_eco_by: 'af %s', // by NAME
         pc_prices_all: 'Alle priser', // All prices
         pc_prices_changed: 'Ændrede', // Changed
         pc_prices_groups: 'Grupper', // Groups (sidebar section)
         pc_prices_save: 'Gem priser', // Save prices
         pc_prices_discard: 'Fortryd', // Discard
-        pc_prices_reset_row: 'Nulstil til standard', // Reset to default
+        pc_prices_reset_row: 'Brug standardprisen', // Use the default price
         pc_prices_saved: 'Priserne er gemt (%s ændret).', // The prices are saved (N changed).
         pc_prices_none: 'Ingen ændringer', // No changes
         pc_prices_one: '1 ændring', // 1 change
         pc_prices_many: '%s ændringer', // N changes
-        pc_prices_invalid: 'En eller flere priser er ugyldige (0-%s).', // One or more prices are invalid (0-N).
+        pc_prices_invalid: 'En pris er ugyldig. Brug 0-%s.', // A price is invalid. Use 0-N.
         pc_prices_empty: 'Ingen priser matcher.', // No prices match.
-        pc_prices_unsaved_title: 'Gem ændringerne?', // Save the changes?
+        pc_prices_unsaved_title: 'Gem de ændrede priser?', // Save the changed prices?
         pc_prices_unsaved_text: 'Du har ændret priser, som ikke er gemt.', // You have changed prices that are not saved.
         pc_prices_dont_save: 'Gem ikke', // Don't save
         pc_grp_bodywork: 'Karosseri', // Bodywork
@@ -166,6 +173,15 @@
         pc_grp_lights: 'Lys', // Lights
         pc_grp_plates: 'Nummerplade', // Number plate
         pc_grp_other: 'Andet', // Other
+        // Server error keys (owned by the server dev and locales/*.json). Only used when the locale has no
+        // text for a key, so the player still sees the real reason instead of the raw key
+        error: 'Noget gik galt.', // Something went wrong.
+        too_fast: 'Det gik for hurtigt. Prøv igen om lidt.', // Too fast. Try again in a moment.
+        pc_not_boss: 'Kun chefen kan gøre det.', // Only the boss can do that.
+        pc_too_far: 'Du er for langt fra computeren.', // You are too far from the computer.
+        pc_invalid_amount: 'Ugyldigt beløb.', // Invalid amount.
+        pc_no_money: 'Du har ikke penge nok på din bankkonto.', // You do not have enough cash.
+        pc_society_no_money: 'Firmakontoen har ikke penge nok.', // The society account does not have enough money.
     };
 
     function fmt(s, args) {
@@ -186,16 +202,19 @@
     const num = (v) => { const n = Number(v); return isFinite(n) ? n : 0; };
     const pad2 = (n) => (n < 10 ? '0' : '') + n;
 
-    // "$12.500" (Danish thousands separator)
+    // "12.500" (Danish thousands separator)
+    function groupNum(n) {
+        return String(Math.abs(Math.round(num(n)))).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    }
+
+    // "$12.500"
     function money(n) {
         n = Math.round(num(n));
-        const neg = n < 0;
-        return (neg ? '-' : '') + '$' + String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+        return (n < 0 ? '-' : '') + '$' + groupNum(n);
     }
 
     const DAYS = ['søn.', 'man.', 'tir.', 'ons.', 'tor.', 'fre.', 'lør.'];
     const MONTHS = ['jan.', 'feb.', 'mar.', 'apr.', 'maj', 'jun.', 'jul.', 'aug.', 'sep.', 'okt.', 'nov.', 'dec.'];
-    const DAYS_LONG = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag', 'lørdag'];
 
     function toDate(v) {
         if (v === null || v === undefined || v === '') return null;
@@ -265,8 +284,22 @@
             res = null;
         }
         if (!res || typeof res !== 'object') return { ok: false, error: T('pc_err_network') };
-        if (!res.ok) return { ok: false, error: (typeof res.error === 'string' && res.error) || T('pc_err_generic'), code: typeof res.code === 'string' ? res.code : null };
+        if (!res.ok) {
+            const code = typeof res.code === 'string' ? res.code : null;
+            return { ok: false, error: errorText(res.error, code), code };
+        }
         return { ok: true, data: res.data };
+    }
+
+    // The reason Lua sent (already translated by the client from the server's locale key). When the
+    // locale lacks the key, ox_lib returns the key itself; then use our fallback text for that key.
+    function errorText(error, code) {
+        const text = typeof error === 'string' ? error.trim() : '';
+        const key = code || text;
+        const untranslated = !text || text === code || /^[a-z0-9_]+$/.test(text);
+        if (!untranslated) return text;
+        if (key && FALLBACK[key] !== undefined) return T(key);
+        return T('pc_err_generic');
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -286,19 +319,21 @@
         modals: [],
         intervals: [],
         dockMeta: null,
+        widget: null,
     };
     const dom = {};
 
-    // Item categories (derived from the item name; the catalog only has item, label, price, stock)
+    // Item categories (derived from the item name; the catalog only has item, label, price, stock).
+    // Icons are monochrome; the category is told by the glyph and the label, never by a colour.
     const CATS = [
-        { id: 'repair', icon: 'screwdriver-wrench', c: ['#ff9f0a', '#e8590c'] },
-        { id: 'engine', icon: 'gauge-high', c: ['#ff453a', '#b3261e'] },
-        { id: 'brakes', icon: 'compact-disc', c: ['#64d2ff', '#0a84ff'] },
-        { id: 'transmission', icon: 'gears', c: ['#bf5af2', '#8944ab'] },
-        { id: 'suspension', icon: 'arrows-up-down', c: ['#30d158', '#1f9d40'] },
-        { id: 'armor', icon: 'shield-halved', c: ['#7d7aff', '#4a46c8'] },
-        { id: 'turbo', icon: 'fan', c: ['#ffd60a', '#d99a00'] },
-        { id: 'other', icon: 'box', c: ['#98989d', '#636366'] },
+        { id: 'repair', icon: 'screwdriver-wrench' },
+        { id: 'engine', icon: 'gauge-high' },
+        { id: 'brakes', icon: 'compact-disc' },
+        { id: 'transmission', icon: 'gears' },
+        { id: 'suspension', icon: 'arrows-up-down' },
+        { id: 'armor', icon: 'shield-halved' },
+        { id: 'turbo', icon: 'fan' },
+        { id: 'other', icon: 'box' },
     ];
     const CAT_BY = {};
     CATS.forEach((c) => { CAT_BY[c.id] = c; });
@@ -308,28 +343,37 @@
         engine_repair_kit: 'screwdriver-wrench',
         body_repair_kit: 'car-burst',
         tyre: 'circle-dot',
+        cleaning_kit: 'spray-can-sparkles',
     };
 
     function catOf(name) {
         name = String(name);
-        if (/^(repair_kit|engine_repair_kit|body_repair_kit|tyre)$/.test(name)) return 'repair';
+        if (/^(repair_kit|engine_repair_kit|body_repair_kit|tyre|cleaning_kit)$/.test(name)) return 'repair';
         if (name === 'turbo') return 'turbo';
         const m = /^([a-z]+)_lvl\d+$/.exec(name);
         if (m && CAT_BY[m[1]] && m[1] !== 'repair') return m[1];
         return 'other';
     }
 
-    function lvlOf(name) {
-        const m = /_lvl(\d+)$/.exec(String(name));
-        return m ? m[1] : '';
+    function catIndex(name) {
+        return CATS.findIndex((c) => c.id === catOf(name));
     }
 
-    function itemTile(name, size) {
-        const cat = CAT_BY[catOf(name)];
-        const lvl = lvlOf(name);
-        const t = el('div', { class: 'lp-tile', attrs: { style: '--c1:' + cat.c[0] + ';--c2:' + cat.c[1] + (size ? ';--t:' + size : '') } },
-            [ic(ITEM_ICON[name] || cat.icon), lvl ? el('em', { text: lvl }) : null]);
-        return t;
+    // Sort by category, then by name (so levels 1, 2, 3 follow each other)
+    function byCategory(a, b) {
+        const ca = catIndex(a);
+        const cb = catIndex(b);
+        if (ca !== cb) return ca - cb;
+        return a < b ? -1 : (a > b ? 1 : 0);
+    }
+
+    // The item's glyph in a grey circle (ap1le_core's menu icon). size: '' | 'sm' | 'lg'
+    function itemIcon(name, size) {
+        return iconCircle(ITEM_ICON[name] || CAT_BY[catOf(name)].icon, size);
+    }
+
+    function iconCircle(icon, size) {
+        return el('span', { class: 'lp-ico' + (size ? ' ' + size : ''), attrs: { 'aria-hidden': 'true' } }, [ic(icon)]);
     }
 
     function limits() {
@@ -406,23 +450,25 @@
         return el('div', { class: 'lp-side-head', text });
     }
 
-    function hueOf(str) {
-        let h = 0;
-        for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) % 360;
-        return h;
-    }
-
+    // Initials in a grey circle (no per-person colours); online = small green dot
     function avatar(name, online) {
         const initials = String(name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('');
-        return el('div', { class: 'lp-avatar', attrs: { style: '--h:' + hueOf(String(name || '')) } },
+        return el('div', { class: 'lp-avatar', attrs: { 'aria-hidden': 'true' } },
             [initials || '?', online === undefined ? null : el('span', { class: 'dot' + (online ? ' on' : '') })]);
+    }
+
+    // A status word with a small dot. kind: 'ok' | 'warn' | 'err' | 'info' | '' (grey) | 'plain' (no dot)
+    function stateTag(kind, text) {
+        return el('span', { class: 'lp-state' + (kind ? ' ' + kind : ''), text });
     }
 
     // ---------------------------------------------------------------------------------------------
     // Sheets (macOS style confirm dialogs, inside a window) and modals (on the desktop)
     // ---------------------------------------------------------------------------------------------
 
-    // o: { icon, danger, title, text, buttons: [{ label, kind, default, action }] }
+    // o: { title, text, buttons: [{ label, kind, default, action }] } (ap1le_core's confirm dialog: title,
+    // muted text, equal capsule buttons). With a 'danger' button and no explicit default, the first button
+    // (cancel) gets focus, so a quick Enter never does the destructive thing (as in ap1le_core).
     // A button's action may return { ok:false, error } to keep the sheet open with an inline error.
     function buildSheet(o, close) {
         const err = el('div', { class: 'lp-sheet-err', attrs: { role: 'alert' } });
@@ -452,8 +498,8 @@
             row.appendChild(btn);
             if (b.default) def = btn;
         });
+        const hasDanger = (o.buttons || []).some((b) => b.kind === 'danger');
         const node = el('div', { class: 'lp-sheet', attrs: { role: 'alertdialog', 'aria-modal': 'true' } }, [
-            el('div', { class: 'glyph' + (o.danger ? ' danger' : '') }, [ic(o.icon || 'circle-info')]),
             el('h3', { text: o.title || '' }),
             o.text ? el('p', { text: o.text }) : null,
             err,
@@ -461,7 +507,7 @@
         ]);
         return {
             node,
-            focus() { (def || btns[btns.length - 1]).focus(); },
+            focus() { (def || (hasDanger ? btns[0] : btns[btns.length - 1])).focus(); },
             cancel() { if (!busy) close(); },
         };
     }
@@ -604,7 +650,7 @@
         w.tools = el('div', { class: 'lp-win-tools' });
         const bar = el('div', { class: 'lp-win-bar' }, [
             lights,
-            el('div', { class: 'lp-win-title' }, [ic(app.icon), el('span', { text: T(app.key) })]),
+            el('div', { class: 'lp-win-title', text: T(app.key) }),
             w.tools,
         ]);
         w.body = el('div', { class: 'lp-win-body' });
@@ -880,11 +926,10 @@
         ]);
         dom.clock = el('span', { text: '' });
         const ws = (S.data.workshop && S.data.workshop.label) || '';
+        // Right side: only what is real (workshop and clock); no fake wifi/battery glyphs
         const right = el('div', { class: 'lp-mb-group' }, [
-            el('span', { class: 'lp-mb-item static' }, [ic('wifi')]),
-            el('span', { class: 'lp-mb-item static' }, [ic('battery-full')]),
             ws ? el('span', { class: 'lp-mb-item static lp-mb-ws', text: ws }) : null,
-            el('span', { class: 'lp-mb-item static' }, [dom.clock]),
+            el('span', { class: 'lp-mb-item' }, [dom.clock]),
         ]);
         return el('div', { class: 'lp-menubar', attrs: { role: 'menubar' } }, [left, right]);
     }
@@ -893,11 +938,6 @@
         const d = new Date();
         const hm = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
         if (dom.clock) dom.clock.textContent = DAYS[d.getDay()] + ' ' + hm;
-        if (dom.wTime) dom.wTime.textContent = hm;
-        if (dom.wDate) {
-            const dn = DAYS_LONG[d.getDay()];
-            dom.wDate.textContent = dn.charAt(0).toUpperCase() + dn.slice(1) + ' ' + d.getDate() + '. ' + MONTHS[d.getMonth()];
-        }
     }
 
     function buildDock() {
@@ -907,7 +947,7 @@
         apps.forEach((a, i) => {
             if (a.boss && !apps[i - 1].boss) dock.appendChild(el('div', { class: 'lp-dock-sep' }));
             const item = el('button', { class: 'lp-dock-item', attrs: { type: 'button', 'aria-label': T(a.key) } }, [
-                el('div', { class: 'lp-dock-icon', attrs: { style: '--c1:' + a.c[0] + ';--c2:' + a.c[1] } }, [ic(a.icon)]),
+                el('div', { class: 'lp-dock-icon' }, [ic(a.icon)]),
                 el('span', { class: 'lp-dock-label', text: T(a.key) }),
                 el('span', { class: 'lp-dock-dot' }),
             ]);
@@ -936,10 +976,11 @@
             const cx = dock.getBoundingClientRect().left + dock.getBoundingClientRect().width / 2;
             const m = lastX - cx;
             const base = S.dockMeta[0] ? S.dockMeta[0].w : 40;
-            const sigma = base * 1.7;
+            const sigma = base * 1.4;
             S.dockMeta.forEach((it) => {
                 const dist = m - it.c;
-                const s = 1 + 0.62 * Math.exp(-(dist * dist) / (2 * sigma * sigma));
+                // Gentle magnification (macOS-like, but calm)
+            const s = 1 + 0.28 * Math.exp(-(dist * dist) / (2 * sigma * sigma));
                 dom.dockItems[it.id].style.setProperty('--s', s.toFixed(3));
             });
         };
@@ -957,35 +998,41 @@
         return dock;
     }
 
+    // One small glass panel top right: who is logged in, orders on the way / ready, and (chef) the
+    // society balance. Each row opens its app. No decorative clock (the menu bar has the time).
     function buildWidget() {
         const d = S.data;
-        dom.wTime = el('div', { class: 'time' });
-        dom.wDate = el('div', { class: 'date' });
         const widget = el('div', { class: 'lp-widget' }, [
-            dom.wTime,
-            dom.wDate,
-            el('div', { class: 'who' }, [d.name || '', el('span', { text: d.gradeLabel || '' })]),
+            el('div', { class: 'lp-widget-head' }, [
+                el('b', { text: d.name || '' }),
+                el('span', { text: d.gradeLabel || '' }),
+            ]),
         ]);
         const row = (icon, label, appId) => {
-            const val = el('b', { text: '-' });
-            const r = el('button', { class: 'lp-widget-row', attrs: { type: 'button' }, on: { click: () => openApp(appId) } }, [ic(icon), el('span', { text: label }), val]);
-            widget.appendChild(r);
+            const val = el('b', { text: '–' });
+            widget.appendChild(el('button', { class: 'lp-widget-row', attrs: { type: 'button' }, on: { click: () => openApp(appId) } },
+                [iconCircle(icon, 'sm'), el('span', { class: 'lbl', text: label }), val]));
             return val;
         };
         const ordersVal = row('truck-fast', T('pc_widget_orders'), 'orders');
-        const readyVal = row('box', T('pc_widget_ready'), 'orders');
-        let balVal = null;
-        if (S.isBoss) balVal = row('building-columns', T('pc_widget_balance'), 'eco');
+        const readyVal = row('box-open', T('pc_widget_ready'), 'orders');
+        const balVal = S.isBoss ? row('building-columns', T('pc_widget_balance'), 'eco') : null;
 
-        // Quick facts for the widget (best effort; failures leave the dash)
-        rpc('order:list').then((r) => {
+        // Best effort: a failed call leaves the dash
+        const refreshOrders = () => rpc('order:list').then((r) => {
             if (!r.ok || !Array.isArray(r.data) || !S.open) return;
             ordersVal.textContent = String(r.data.filter((o) => o.status === 'ordered').length);
             readyVal.textContent = String(r.data.filter((o) => o.status === 'arrived').length);
         });
+        const setBalance = (v) => {
+            if (balVal && v !== null && v !== undefined && isFinite(Number(v))) balVal.textContent = money(v);
+        };
+        S.widget = { refreshOrders, setBalance };
+
+        refreshOrders();
         if (balVal) {
             rpc('computer:economy').then((r) => {
-                if (r.ok && r.data && S.open) balVal.textContent = money(r.data.balance);
+                if (r.ok && r.data && S.open) setBalance(r.data.balance);
             });
         }
         return widget;
@@ -1006,6 +1053,7 @@
         S.modals = [];
         S.cart = {};
         S.dockMeta = null;
+        S.widget = null;
         root.textContent = '';
         Object.keys(dom).forEach((k) => { delete dom[k]; });
     }
@@ -1030,7 +1078,9 @@
         dom.desk = el('div', { class: 'lp-desk' }, [buildWidget(), dom.windows]);
         dom.dock = buildDock();
         dom.screen = el('div', { class: 'lp-screen' }, [
-            el('div', { class: 'lp-wallpaper' }),
+            el('div', { class: 'lp-wallpaper' }, [
+                el('div', { class: 'lp-wallpaper-mark' }, [ic('wrench'), el('span', { text: (S.data.workshop && S.data.workshop.label) || '' })]),
+            ]),
             dom.desk,
             buildMenubar(),
             el('div', { class: 'lp-notch' }),
@@ -1118,12 +1168,12 @@
         const side = el('aside', { class: 'lp-side' });
         const title = el('div', { class: 'lp-h1' });
         const listBox = el('div', { class: 'lp-scroll' });
-        const status = el('div', { class: 'lp-status' });
+        const status = el('div', { class: 'lp-statusbar' });
         const main = el('div', { class: 'lp-main' }, [title, listBox, status]);
         win.body.append(side, main);
 
         const search = searchBox((v) => { q = v.trim().toLowerCase(); renderList(); });
-        const refreshBtn = el('button', { class: 'lp-btn icon', attrs: { type: 'button', title: T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
+        const refreshBtn = el('button', { class: 'lp-btn icon ghost', attrs: { type: 'button', title: T('pc_refresh'), 'aria-label': T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
         win.tools.append(search.node, refreshBtn);
 
         const inStock = (r) => r.count > 0;
@@ -1137,7 +1187,7 @@
                 sideHead(T('pc_side_stock')),
                 sideItem('boxes-stacked', T('pc_filter_all'), rows.length, filter === 'all', () => setFilter('all')),
                 sideItem('circle-check', T('pc_filter_in'), rows.filter(inStock).length, filter === 'in', () => setFilter('in')),
-                sideItem('triangle-exclamation', T('pc_filter_low'), rows.filter(isLow).length, filter === 'low', () => setFilter('low')),
+                sideItem('battery-quarter', T('pc_filter_low'), rows.filter(isLow).length, filter === 'low', () => setFilter('low')),
                 sideItem('circle-xmark', T('pc_filter_out'), rows.filter((r) => !inStock(r)).length, filter === 'out', () => setFilter('out')),
                 sideHead(T('pc_side_categories')),
             );
@@ -1170,6 +1220,13 @@
             return true;
         }
 
+        // Count + one status word. Colour only when something needs attention (low / out)
+        function qtyCell(r) {
+            if (r.count <= 0) return el('div', { class: 'lp-qty is-out' }, [el('b', { text: '0' }), stateTag('err', T('pc_out_of_stock'))]);
+            if (isLow(r)) return el('div', { class: 'lp-qty' }, [el('b', { text: r.count }), stateTag('warn', T('pc_low_stock'))]);
+            return el('div', { class: 'lp-qty' }, [el('b', { text: r.count })]);
+        }
+
         function renderList() {
             if (failed) {
                 title.textContent = '';
@@ -1179,13 +1236,12 @@
                 return;
             }
             const list = rows.filter(matches);
-            title.textContent = '';
-            title.append(filterLabel());
+            title.textContent = filterLabel();
             listBox.textContent = '';
             if (!list.length) {
                 listBox.appendChild(emptyState('box-open', T('pc_stock_empty')));
             } else {
-                const table = el('div', { class: 'lp-table', attrs: { style: '--cols:minmax(0,2.3fr) minmax(0,1.1fr) 5.5em minmax(0,1.5fr) 6.5em' } });
+                const table = el('div', { class: 'lp-table', attrs: { style: '--cols:minmax(0,2.4fr) minmax(0,1fr) 6em minmax(0,1.5fr) 6.5em' } });
                 table.appendChild(el('div', { class: 'lp-thead' }, [
                     el('span', { text: T('pc_col_item') }),
                     el('span', { text: T('pc_col_category') }),
@@ -1194,26 +1250,21 @@
                     el('span'),
                 ]));
                 list.forEach((r) => {
-                    const cls = r.count <= 0 ? 'out' : (isLow(r) ? 'low' : '');
-                    const pill = r.count <= 0
-                        ? el('span', { class: 'lp-pill err', text: T('pc_out_of_stock') })
-                        : (isLow(r) ? el('span', { class: 'lp-pill warn', text: r.count + ' · ' + T('pc_low_stock') })
-                            : el('span', { class: 'lp-pill ok', text: T('pc_in_stock', r.count) }));
-                    const bar = el('div', { class: 'lp-stockbar ' + cls }, [el('i', { attrs: { style: 'width:' + Math.round(Math.min(1, r.count / 12) * 100) + '%' } })]);
+                    // Every row the same quiet button: the status dot already says which ones need ordering
                     const orderBtn = r.price !== null
-                        ? el('button', { class: 'lp-btn sm ' + (r.count <= LOW ? 'primary' : ''), attrs: { type: 'button' }, on: { click: () => orderItem(r.name) } }, [ic('cart-plus'), T('pc_order_btn')])
+                        ? el('button', { class: 'lp-btn sm', text: T('pc_order_btn'), attrs: { type: 'button' }, on: { click: () => orderItem(r.name) } })
                         : el('span');
                     table.appendChild(el('div', { class: 'lp-trow' }, [
-                        el('div', { class: 'name' }, [itemTile(r.name), el('span', { text: r.label })]),
+                        el('div', { class: 'name' }, [itemIcon(r.name, 'sm'), el('span', { text: r.label })]),
                         el('span', { class: 'lp-muted', text: T('pc_cat_' + catOf(r.name)) }),
                         el('span', { class: 'lp-right', text: r.price !== null ? money(r.price) : '' }),
-                        el('div', { class: 'qty' }, [pill, bar]),
+                        qtyCell(r),
                         el('div', { class: 'lp-right' }, [orderBtn]),
                     ]));
                 });
                 listBox.appendChild(table);
             }
-            const total = rows.reduce((s, r) => s + r.count, 0);
+            const total = rows.reduce((sum, r) => sum + r.count, 0);
             status.textContent = '';
             status.append(el('span', { text: T('pc_stock_summary', rows.length, total) }));
             if (S.data.workshop && S.data.workshop.label) status.append(el('span', { text: S.data.workshop.label }));
@@ -1232,6 +1283,8 @@
             const [st, cat] = await Promise.all([rpc('stock:get'), rpc('computer:catalog')]);
             if (!win.alive()) return;
             if (!st.ok) {
+                // A failed refresh keeps the list that is already shown
+                if (loadedOnce) return;
                 failed = st.error;
                 renderList();
                 return;
@@ -1247,12 +1300,7 @@
                 const r = map.get(i.name);
                 if (r) { r.count = num(i.count); } else { map.set(i.name, { name: i.name, label: String(i.label || i.name), price: null, count: num(i.count) }); }
             });
-            rows = Array.from(map.values()).sort((a, b) => {
-                const ca = CATS.findIndex((c) => c.id === catOf(a.name));
-                const cb = CATS.findIndex((c) => c.id === catOf(b.name));
-                if (ca !== cb) return ca - cb;
-                return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
-            });
+            rows = Array.from(map.values()).sort((a, b) => byCategory(a.name, b.name));
             renderSide();
             renderList();
         }
@@ -1282,7 +1330,7 @@
         win.body.append(side, main, cartPane);
 
         const search = searchBox((v) => { q = v.trim().toLowerCase(); renderGrid(); });
-        const refreshBtn = el('button', { class: 'lp-btn icon', attrs: { type: 'button', title: T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
+        const refreshBtn = el('button', { class: 'lp-btn icon ghost', attrs: { type: 'button', title: T('pc_refresh'), 'aria-label': T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
         win.tools.append(search.node, refreshBtn);
 
         const byItem = () => {
@@ -1305,6 +1353,13 @@
             });
         }
 
+        // Stock in the workshop, as a quiet line: "3 på lager" (grey), low (yellow dot), none (red dot)
+        function stockTag(stock) {
+            if (stock <= 0) return stateTag('err', T('pc_out_of_stock'));
+            if (stock <= LOW) return stateTag('warn', T('pc_in_stock', stock));
+            return stateTag('plain', T('pc_in_stock', stock));
+        }
+
         function renderGrid() {
             grid.textContent = '';
             if (failed) { grid.appendChild(errorState(failed, load)); return; }
@@ -1314,29 +1369,30 @@
             const wrap = el('div', { class: 'lp-grid' });
             list.forEach((c) => {
                 const qty = S.cart[c.item] || 0;
-                const stock = num(c.stock);
-                const badge = stock <= 0
-                    ? el('span', { class: 'lp-pill err', text: T('pc_out_of_stock') })
-                    : (stock <= LOW ? el('span', { class: 'lp-pill warn', text: T('pc_in_stock', stock) }) : el('span', { class: 'lp-pill ok', text: T('pc_in_stock', stock) }));
                 let control;
                 if (qty > 0) {
-                    control = el('div', { class: 'lp-step' }, [
-                        el('button', { attrs: { type: 'button', 'aria-label': '-' }, on: { click: () => cartAdd(c.item, -1) } }, [ic('minus')]),
-                        el('b', { text: qty }),
-                        el('button', { attrs: { type: 'button', 'aria-label': '+' }, on: { click: () => flash(cartAdd(c.item, 1)) } }, [ic('plus')]),
-                    ]);
-                    if (qty >= lim.perLine) control.lastChild.disabled = true;
+                    control = stepper(qty, () => cartAdd(c.item, -1), () => flash(cartAdd(c.item, 1)), qty >= lim.perLine);
                 } else {
-                    control = el('button', { class: 'lp-btn sm primary', attrs: { type: 'button' }, on: { click: () => flash(cartAdd(c.item, 1)) } }, [ic('cart-plus'), T('pc_add_cart')]);
+                    control = el('button', { class: 'lp-btn sm', text: T('pc_add_cart'), attrs: { type: 'button' }, on: { click: () => flash(cartAdd(c.item, 1)) } });
                 }
                 wrap.appendChild(el('div', { class: 'lp-card' + (qty > 0 ? ' in-cart' : '') }, [
-                    el('div', { class: 'top' }, [itemTile(c.item, '3em'), badge]),
-                    el('div', { class: 'nm', text: c.label }),
+                    el('div', { class: 'top' }, [itemIcon(c.item), stockTag(num(c.stock))]),
+                    el('div', { class: 'nm', text: c.label, attrs: { title: c.label } }),
                     el('div', { class: 'price', text: money(c.price) }),
                     el('div', { class: 'foot' }, [control]),
                 ]));
             });
             grid.appendChild(wrap);
+        }
+
+        function stepper(qty, onMinus, onPlus, plusDisabled) {
+            const plus = el('button', { attrs: { type: 'button', 'aria-label': '+' }, on: { click: onPlus } }, [ic('plus')]);
+            if (plusDisabled) plus.disabled = true;
+            return el('div', { class: 'lp-step' }, [
+                el('button', { attrs: { type: 'button', 'aria-label': '-' }, on: { click: onMinus } }, [ic('minus')]),
+                el('b', { text: qty }),
+                plus,
+            ]);
         }
 
         function flash(err) {
@@ -1352,45 +1408,34 @@
             cartPane.textContent = '';
             const head = el('div', { class: 'lp-cart-head' }, [
                 el('span', { text: T('pc_cart') }),
-                lines.length ? el('button', { class: 'lp-btn sm', text: T('pc_cart_clear'), attrs: { type: 'button' }, on: { click: () => { S.cart = {}; msg = null; notifyCart(); } } }) : null,
+                lines.length ? el('button', { class: 'lp-btn sm ghost', text: T('pc_cart_clear'), attrs: { type: 'button' }, on: { click: () => { S.cart = {}; msg = null; notifyCart(); } } }) : null,
             ]);
             const box = el('div', { class: 'lp-cart-lines' });
             if (!lines.length) {
-                box.appendChild(el('div', { class: 'lp-empty' }, [ic('cart-shopping'), el('p', { text: T('pc_cart_empty') })]));
+                box.appendChild(el('div', { class: 'lp-empty' }, [el('p', { text: T('pc_cart_empty') })]));
             }
-            lines.forEach((k) => {
+            lines.sort(byCategory).forEach((k) => {
                 const c = m[k];
                 const label = c ? c.label : k;
                 box.appendChild(el('div', { class: 'lp-cart-line' }, [
-                    itemTile(k, '2.2em'),
-                    el('div', { class: 'nm', text: label }),
-                    el('button', { class: 'lp-btn sm icon', attrs: { type: 'button', title: T('pc_cart_remove') }, on: { click: () => cartSet(k, 0) } }, [ic('xmark')]),
+                    itemIcon(k, 'sm'),
+                    el('div', { class: 'nm', text: label, attrs: { title: label } }),
+                    el('button', { class: 'lp-btn sm icon ghost', attrs: { type: 'button', title: T('pc_cart_remove'), 'aria-label': T('pc_cart_remove') }, on: { click: () => cartSet(k, 0) } }, [ic('xmark')]),
                     el('div', { class: 'sub' }, [
-                        el('div', { class: 'lp-step' }, [
-                            el('button', { attrs: { type: 'button', 'aria-label': '-' }, on: { click: () => cartAdd(k, -1) } }, [ic('minus')]),
-                            el('b', { text: S.cart[k] }),
-                            (() => {
-                                const b = el('button', { attrs: { type: 'button', 'aria-label': '+' }, on: { click: () => flash(cartAdd(k, 1)) } }, [ic('plus')]);
-                                if (S.cart[k] >= lim.perLine) b.disabled = true;
-                                return b;
-                            })(),
-                        ]),
+                        stepper(S.cart[k], () => cartAdd(k, -1), () => flash(cartAdd(k, 1)), S.cart[k] >= lim.perLine),
                         el('span', { class: 'lp-muted', text: money((c ? num(c.price) : 0) * S.cart[k]) }),
                     ]),
                 ]));
             });
             const foot = el('div', { class: 'lp-cart-foot' });
             if (msg) foot.appendChild(banner(msg.kind, msg.text, () => { msg = null; renderCart(); }));
+            const submitBtn = el('button', { class: 'lp-btn lg primary block', attrs: { type: 'button' }, on: { click: submit } },
+                busy ? [el('span', { class: 'lp-spin', attrs: { style: 'width:1em;height:1em;border-width:0.13em' } }), T('pc_ordering')] : [T('pc_place_order')]);
+            submitBtn.disabled = busy || !lines.length;
             foot.append(
-                el('div', { class: 'lp-cart-note' }, [ic('building-columns'), el('span', { text: T('pc_society_pays') })]),
-                el('div', { class: 'lp-cart-note' }, [ic('clock'), el('span', { text: T('pc_delivery_eta', lim.minutes) })]),
                 el('div', { class: 'total' }, [el('span', { class: 'lp-muted', text: T('pc_total') }), el('b', { text: money(total) })]),
-                (() => {
-                    const b = el('button', { class: 'lp-btn lg primary block', attrs: { type: 'button' }, on: { click: submit } },
-                        [ic(busy ? 'spinner' : 'truck-fast', busy ? 'fa-spin' : ''), busy ? T('pc_ordering') : T('pc_place_order')]);
-                    b.disabled = busy || !lines.length;
-                    return b;
-                })(),
+                el('div', { class: 'lp-cart-note', text: T('pc_society_pays') + ' ' + T('pc_delivery_eta', lim.minutes) }),
+                submitBtn,
             );
             cartPane.append(head, box, foot);
         }
@@ -1415,7 +1460,8 @@
             msg = { kind: 'ok', text: T('pc_order_placed', d.id !== undefined ? d.id : '', money(d.total), mins) };
             S.cart = {};
             notifyCart();
-            refreshApps(['orders', 'stock']);
+            refreshApps(['orders', 'stock', 'eco']);
+            if (S.widget) S.widget.refreshOrders();
             load(true);
         }
 
@@ -1427,18 +1473,14 @@
             const r = await rpc('computer:catalog');
             if (!win.alive()) return;
             if (!r.ok) {
-                // A failed quiet refresh keeps the catalog that is already shown
-                if (quiet && loadedOnce) return;
+                // A failed refresh keeps the catalog that is already shown
+                if (loadedOnce) return;
                 failed = r.error;
             } else {
                 failed = null;
                 loadedOnce = true;
                 catalog = (Array.isArray(r.data) ? r.data : []).map((c) => ({ item: String(c.item), label: String(c.label || c.item), price: num(c.price), stock: num(c.stock) }));
-                catalog.sort((a, b) => {
-                    const ca = CATS.findIndex((x) => x.id === catOf(a.item));
-                    const cb = CATS.findIndex((x) => x.id === catOf(b.item));
-                    return ca !== cb ? ca - cb : (a.item < b.item ? -1 : 1);
-                });
+                catalog.sort((a, b) => byCategory(a.item, b.item));
             }
             renderSide();
             renderGrid();
@@ -1477,13 +1519,14 @@
             { id: 'arrived', label: T('pc_st_arrived') },
             { id: 'collected', label: T('pc_st_collected') },
         ], filter, (v) => { filter = v; render(); });
-        const refreshBtn = el('button', { class: 'lp-btn icon', attrs: { type: 'button', title: T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
+        const refreshBtn = el('button', { class: 'lp-btn icon ghost', attrs: { type: 'button', title: T('pc_refresh'), 'aria-label': T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
         win.tools.append(seg.node, refreshBtn);
 
+        // Glyph + status dot. Only "ready" uses a status colour: it is the one that needs someone to act
         const STATUS = {
-            ordered: { icon: 'truck-fast', c: ['#0a84ff', '#0a5bc4'], pill: 'info' },
-            arrived: { icon: 'box', c: ['#32d74b', '#1f9d40'], pill: 'ok' },
-            collected: { icon: 'circle-check', c: ['#98989d', '#636366'], pill: '' },
+            ordered: { icon: 'truck-fast', state: 'info' },
+            arrived: { icon: 'box-open', state: 'ok' },
+            collected: { icon: 'check', state: '' },
         };
 
         function remaining(o) {
@@ -1497,21 +1540,23 @@
             const list = orders.filter((o) => filter === 'all' || o.status === filter);
             if (!list.length) { box.appendChild(emptyState('truck-ramp-box', T('pc_orders_empty'))); return; }
             const total = limits().minutes * 60;
+            const wrap = el('div', { class: 'lp-list' });
             list.forEach((o) => {
-                const st = STATUS[o.status] || STATUS.collected;
-                const items = el('div', { class: 'items' });
-                (Array.isArray(o.items) ? o.items : []).forEach((i) => {
-                    items.appendChild(el('span', { class: 'lp-chip', text: num(i.count) + '× ' + (i.label || i.item) }));
-                });
+                const key = STATUS[o.status] ? o.status : 'collected';
+                const st = STATUS[key];
+                const items = (Array.isArray(o.items) ? o.items : []).map((i) => num(i.count) + '× ' + (i.label || i.item)).join(', ');
                 const meta = [o.ordered_by ? T('pc_order_by', o.ordered_by) : '', fmtDate(o.created_at)].filter(Boolean).join(' · ');
                 const card = el('div', { class: 'lp-order' }, [
-                    el('div', { class: 'lp-tile ico', attrs: { style: '--c1:' + st.c[0] + ';--c2:' + st.c[1] } }, [ic(st.icon)]),
-                    el('div', { class: 'mid' }, [el('div', { class: 'ttl', text: T('pc_order_no', o.id) }), el('div', { class: 'meta', text: meta })]),
+                    iconCircle(st.icon),
+                    el('div', { class: 'mid' }, [
+                        el('div', { class: 'ttl', text: T('pc_order_no', o.id) }),
+                        el('div', { class: 'meta', text: meta }),
+                        items ? el('div', { class: 'items', text: items }) : null,
+                    ]),
                     el('div', { class: 'side' }, [
                         el('b', { text: money(o.total) }),
-                        el('span', { class: 'lp-pill ' + st.pill, text: T('pc_st_' + (STATUS[o.status] ? o.status : 'collected')) }),
+                        stateTag(st.state, T('pc_st_' + key)),
                     ]),
-                    items,
                 ]);
                 if (o.status === 'ordered') {
                     const fill = el('i');
@@ -1519,10 +1564,11 @@
                     card.appendChild(el('div', { class: 'prog' }, [el('div', { class: 'bar' }, [fill]), eta]));
                     live.push({ o, fill, eta, total: Math.max(total, num(o.eta)) });
                 } else if (o.status === 'arrived') {
-                    card.appendChild(el('div', { class: 'ready' }, [ic('hand-point-up'), el('span', { text: T('pc_order_ready') })]));
+                    card.appendChild(el('div', { class: 'ready', text: T('pc_order_ready') }));
                 }
-                box.appendChild(card);
+                wrap.appendChild(card);
             });
+            box.appendChild(wrap);
             tick();
         }
 
@@ -1549,6 +1595,8 @@
             const r = await rpc('order:list');
             if (!win.alive()) return;
             if (!r.ok) {
+                // A failed refresh keeps the list that is already shown
+                if (loadedOnce) return;
                 failed = r.error;
             } else {
                 failed = null;
@@ -1581,13 +1629,13 @@
         const me = S.data;
 
         const side = el('aside', { class: 'lp-side' });
-        const alertBox = el('div');
+        const alertBox = el('div', { class: 'lp-alert-wrap' });
         const listBox = el('div', { class: 'lp-scroll' });
         const main = el('div', { class: 'lp-main' }, [alertBox, listBox]);
         win.body.append(side, main);
 
         const search = searchBox((v) => { q = v.trim().toLowerCase(); renderList(); });
-        const refreshBtn = el('button', { class: 'lp-btn icon', attrs: { type: 'button', title: T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
+        const refreshBtn = el('button', { class: 'lp-btn icon ghost', attrs: { type: 'button', title: T('pc_refresh'), 'aria-label': T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
         win.tools.append(search.node, refreshBtn);
 
         function setMsg(kind, text) {
@@ -1601,10 +1649,10 @@
             side.append(
                 sideHead(T('pc_staff_group')),
                 sideItem('users', T('pc_staff_all'), staff.length, view === 'all', () => setView('all')),
-                sideItem('circle', T('pc_staff_online'), staff.filter((s) => s.online).length, view === 'online', () => setView('online')),
+                sideItem('signal', T('pc_staff_online'), staff.filter((s) => s.online).length, view === 'online', () => setView('online')),
                 sideItem('moon', T('pc_staff_offline'), staff.filter((s) => !s.online).length, view === 'offline', () => setView('offline')),
                 sideHead(T('pc_staff_hire')),
-                sideItem('user-plus', T('pc_staff_hire'), nearby.length ? nearby.length : null, view === 'hire', () => setView('hire')),
+                sideItem('user-plus', T('pc_staff_nearby'), nearby.length ? nearby.length : null, view === 'hire', () => setView('hire')),
             );
         }
 
@@ -1628,19 +1676,22 @@
             if (!list.length) { listBox.appendChild(emptyState('users', T('pc_staff_empty'))); return; }
             list.sort((a, b) => (b.grade - a.grade) || String(a.name).localeCompare(String(b.name)));
             const selectable = grades.filter((g) => num(g.grade) < me.grade);
+            const wrap = el('div', { class: 'lp-list' });
+            listBox.appendChild(wrap);
             list.forEach((s) => {
                 const locked = s.grade >= me.grade;
                 const isMe = s.name === me.name && s.grade === me.grade;
                 const who = el('div', { class: 'who' }, [
                     avatar(s.name, s.online),
-                    el('div', { attrs: { style: 'min-width:0' } }, [
+                    el('div', {}, [
                         el('b', { text: s.name }),
                         isMe ? el('small', { text: T('pc_staff_you') }) : null,
                     ]),
                 ]);
                 let rank;
                 if (locked) {
-                    rank = el('span', { class: 'lp-pill', attrs: { title: T('pc_staff_locked') } }, [ic('lock'), s.gradeLabel || gradeLabel(s.grade)]);
+                    // Same or higher rank than the chef: shown, not editable
+                    rank = el('span', { class: 'rank-fixed', attrs: { title: T('pc_staff_locked') } }, [ic('lock'), el('span', { text: s.gradeLabel || gradeLabel(s.grade) })]);
                 } else {
                     rank = el('select', { class: 'lp-select', attrs: { 'aria-label': T('pc_staff_grade') } });
                     selectable.forEach((g) => {
@@ -1657,23 +1708,25 @@
                     });
                 }
                 const acts = el('div', { class: 'acts' }, [
-                    locked ? null : el('button', { class: 'lp-btn sm ghost-danger', attrs: { type: 'button' }, on: { click: () => confirmFire(s) } }, [ic('user-minus'), T('pc_staff_fire')]),
+                    locked ? null : el('button', { class: 'lp-btn sm quiet-danger', text: T('pc_staff_fire'), attrs: { type: 'button' }, on: { click: () => confirmFire(s) } }),
                 ]);
-                listBox.appendChild(el('div', { class: 'lp-person' }, [
+                wrap.appendChild(el('div', { class: 'lp-person' }, [
                     who,
                     el('div', {}, [rank]),
-                    el('div', { class: 'state ' + (s.online ? 'on' : 'off') }, [ic('circle'), el('span', { text: s.online ? T('pc_staff_online') : T('pc_staff_offline') })]),
+                    stateTag(s.online ? 'ok' : '', s.online ? T('pc_staff_online') : T('pc_staff_offline')),
                     acts,
                 ]));
             });
         }
 
         function renderHire() {
+            const wrap = el('div', { class: 'lp-list' });
             listBox.appendChild(el('div', { class: 'lp-pad lp-muted', text: T('pc_nearby_hint') }));
             const list = nearby.filter((n) => !q || String(n.name).toLowerCase().indexOf(q) >= 0);
             if (!list.length) { listBox.appendChild(emptyState('user-plus', T('pc_nearby_empty'))); return; }
+            listBox.appendChild(wrap);
             list.forEach((n) => {
-                const btn = el('button', { class: 'lp-btn sm primary', attrs: { type: 'button' } }, [ic('user-plus'), T('pc_hire_btn')]);
+                const btn = el('button', { class: 'lp-btn sm primary', text: T('pc_hire_btn'), attrs: { type: 'button' } });
                 btn.addEventListener('click', async () => {
                     btn.disabled = true;
                     // The player has to accept the offer on their own screen first (up to 30 s)
@@ -1684,8 +1737,8 @@
                     await load(true);
                     loadNearby(true);
                 });
-                listBox.appendChild(el('div', { class: 'lp-person', attrs: { style: 'grid-template-columns:minmax(0,1fr) auto' } }, [
-                    el('div', { class: 'who' }, [avatar(n.name), el('div', { attrs: { style: 'min-width:0' } }, [el('b', { text: n.name }), el('small', { text: T('pc_server_id', n.serverId) })])]),
+                wrap.appendChild(el('div', { class: 'lp-person hire' }, [
+                    el('div', { class: 'who' }, [avatar(n.name), el('div', {}, [el('b', { text: n.name }), el('small', { text: T('pc_server_id', n.serverId) })])]),
                     el('div', { class: 'acts' }, [btn]),
                 ]));
             });
@@ -1693,8 +1746,6 @@
 
         function confirmFire(s) {
             winSheet(win, {
-                icon: 'user-minus',
-                danger: true,
                 title: T('pc_fire_title', s.name),
                 text: T('pc_fire_text', s.name),
                 buttons: [
@@ -1765,72 +1816,94 @@
     // App: Okonomi (finances, chef only)
     // ---------------------------------------------------------------------------------------------
 
+    // History rows: a monochrome glyph per type; incoming amounts in green, outgoing in plain text
     const HIST = {
-        invoice: { icon: 'file-invoice-dollar', c: ['#32d74b', '#1f9d40'], sign: 1 },
-        order: { icon: 'box', c: ['#ff9f0a', '#e8590c'], sign: -1 },
-        deposit: { icon: 'arrow-down', c: ['#0a84ff', '#0a5bc4'], sign: 1 },
-        withdraw: { icon: 'arrow-up', c: ['#bf5af2', '#8944ab'], sign: -1 },
+        invoice: { icon: 'file-invoice-dollar', sign: 1 },
+        order: { icon: 'box', sign: -1 },
+        deposit: { icon: 'arrow-down', sign: 1 },
+        withdraw: { icon: 'arrow-up', sign: -1 },
     };
 
+    // Society deposit/withdraw (v3 A1). Lua runs esx_society's own events (see client/computer.lua) and
+    // answers { ok, data = { kind, amount, balance }, error, code }. The NUI:
+    //   - shows `error` exactly as Lua sent it (the server's / esx_society's reason, e.g. "not enough
+    //     cash", "only the boss can withdraw", "the transfer did not go through"), never a generic text
+    //     when a real reason exists;
+    //   - shows the new balance from the answer at once (data.balance), then reloads the history;
+    //   - keeps the shown balance and history if that reload fails (it does not swap the whole app for
+    //     an error screen, which in v2 also hid the transfer result).
     function mountEco(win) {
-        let balance = 0;
+        let balance = null;
         let history = [];
         let filter = 'all';
         let failed = null;
         let loadedOnce = false;
-        let busy = false;
+        let busy = null; // null | 'computer:deposit' | 'computer:withdraw'
         let xferMsg = null;
 
         const scroll = el('div', { class: 'lp-scroll' });
         const main = el('div', { class: 'lp-main' }, [scroll]);
         win.body.append(main);
 
-        const refreshBtn = el('button', { class: 'lp-btn icon', attrs: { type: 'button', title: T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
+        const refreshBtn = el('button', { class: 'lp-btn icon ghost', attrs: { type: 'button', title: T('pc_refresh'), 'aria-label': T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
         win.tools.append(refreshBtn);
 
-        const amountInput = el('input', { class: 'lp-input', attrs: { type: 'text', inputmode: 'numeric', maxlength: '9', placeholder: '0', autocomplete: 'off', 'aria-label': T('pc_eco_amount') } });
+        // The amount field lives across re-renders (keeps focus and what was typed)
+        const amountInput = el('input', { attrs: { type: 'text', inputmode: 'numeric', maxlength: '9', placeholder: '0', autocomplete: 'off', 'aria-label': T('pc_eco_amount') } });
+        const amountField = el('label', { class: 'lp-money-input lg' }, [el('span', { text: '$' }), amountInput]);
         amountInput.addEventListener('input', () => {
             amountInput.value = amountInput.value.replace(/[^\d]/g, '');
-            amountInput.classList.remove('is-bad');
+            amountField.classList.remove('is-bad');
         });
-        amountInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.stopPropagation(); });
+        amountInput.addEventListener('focus', () => amountField.classList.add('is-focus'));
+        amountInput.addEventListener('blur', () => amountField.classList.remove('is-focus'));
+        // Enter does nothing here on purpose: deposit and withdraw are both one click away, and a stray
+        // Enter must not move money
+        amountInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); } });
 
         let histBox = null;
+        let balanceEl = null;
 
         function typeKey(t) { return HIST[t] ? t : 'order'; }
 
         function buildTop() {
-            const lim = limits();
             let income = 0;
             let expense = 0;
-            history.forEach((h) => { const a = num(h.amount); if (HIST[typeKey(h.type)].sign > 0) income += a; else expense += a; });
+            history.forEach((h) => { const v = num(h.amount); if (HIST[typeKey(h.type)].sign > 0) income += v; else expense += v; });
 
-            const hero = el('div', { class: 'lp-balance' }, [
-                el('div', { class: 'lbl' }, [ic('building-columns'), T('pc_eco_title')]),
-                el('div', { class: 'amt', text: money(balance) }),
+            balanceEl = el('div', { class: 'amt', text: balance === null ? '–' : money(balance) });
+            const bal = el('div', { class: 'lp-panel lp-balance' }, [
+                el('div', { class: 'lbl', text: T('pc_eco_title') }),
+                balanceEl,
                 el('div', { class: 'sums' }, [
-                    el('span', { text: T('pc_eco_income') + ' ' + money(income) }),
-                    el('span', { text: T('pc_eco_expense') + ' ' + money(expense) }),
+                    el('div', {}, [el('small', { text: T('pc_eco_income') }), el('b', { text: money(income) })]),
+                    el('div', {}, [el('small', { text: T('pc_eco_expense') }), el('b', { text: money(expense) })]),
+                    history.length ? el('div', { class: 'cap', text: T('pc_eco_period', history.length) }) : null,
                 ]),
             ]);
 
-            const xfer = el('div', { class: 'lp-transfer' });
-            xfer.appendChild(el('h3', { text: T('pc_eco_transfer') }));
-            const field = el('div', { class: 'lp-money-input' }, [el('span', { text: '$' }), amountInput]);
-            xfer.appendChild(field);
-            const chips = el('div', { class: 'chips' });
+            const quick = el('div', { class: 'quick' });
             [1000, 5000, 10000, 50000].forEach((v) => {
-                chips.appendChild(el('button', { text: money(v), attrs: { type: 'button' }, on: { click: () => { amountInput.value = String(v); amountInput.classList.remove('is-bad'); amountInput.focus(); } } }));
+                quick.appendChild(el('button', { class: 'lp-btn sm', text: money(v), attrs: { type: 'button' }, on: { click: () => { amountInput.value = String(v); amountField.classList.remove('is-bad'); amountInput.focus(); } } }));
             });
-            xfer.appendChild(chips);
-            if (xferMsg) xfer.appendChild(banner(xferMsg.kind, xferMsg.text));
-            const dep = el('button', { class: 'lp-btn primary', attrs: { type: 'button' }, on: { click: () => transfer('computer:deposit') } }, [ic('arrow-down'), T('pc_eco_deposit')]);
-            const wd = el('button', { class: 'lp-btn', attrs: { type: 'button' }, on: { click: () => transfer('computer:withdraw') } }, [ic('arrow-up'), T('pc_eco_withdraw')]);
-            dep.disabled = busy;
-            wd.disabled = busy;
-            xfer.appendChild(el('div', { class: 'btns' }, [dep, wd]));
-            void lim;
-            return el('div', { class: 'lp-hero' }, [hero, xfer]);
+            const btnKids = (method, label) => (busy === method
+                ? [el('span', { class: 'lp-spin', attrs: { style: 'width:1em;height:1em;border-width:0.13em' } }), label]
+                : [label]);
+            const dep = el('button', { class: 'lp-btn primary', attrs: { type: 'button' }, on: { click: () => transfer('computer:deposit') } }, btnKids('computer:deposit', T('pc_eco_deposit')));
+            const wd = el('button', { class: 'lp-btn', attrs: { type: 'button' }, on: { click: () => transfer('computer:withdraw') } }, btnKids('computer:withdraw', T('pc_eco_withdraw')));
+            dep.disabled = !!busy;
+            wd.disabled = !!busy;
+            amountInput.disabled = !!busy;
+
+            const xfer = el('div', { class: 'lp-panel lp-transfer' }, [
+                el('h3', { text: T('pc_eco_transfer') }),
+                amountField,
+                quick,
+                el('div', { class: 'hint', text: T('pc_eco_cash_hint') }),
+                xferMsg ? banner(xferMsg.kind, xferMsg.text, () => { xferMsg = null; render(); }) : null,
+                el('div', { class: 'btns' }, [dep, wd]),
+            ]);
+            return el('div', { class: 'lp-eco-top' }, [bal, xfer]);
         }
 
         function buildHistoryList() {
@@ -1838,25 +1911,26 @@
             const list = history.filter((h) => filter === 'all'
                 || (filter === 'transfer' ? (h.type === 'deposit' || h.type === 'withdraw') : h.type === filter));
             if (!list.length) { histBox.appendChild(emptyState('receipt', T('pc_eco_empty'))); return; }
-            const table = el('div', { class: 'lp-table', attrs: { style: '--cols:minmax(0,2.2fr) minmax(0,1.2fr) 8.5em 7em' } });
+            const table = el('div', { class: 'lp-table', attrs: { style: '--cols:minmax(0,2.2fr) minmax(0,1.2fr) 8.5em 7.5em' } });
             list.forEach((h) => {
                 const tk = typeKey(h.type);
                 const cfg = HIST[tk];
-                const amt = num(h.amount);
+                const v = num(h.amount);
                 table.appendChild(el('div', { class: 'lp-trow' }, [
                     el('div', { class: 'name' }, [
-                        el('div', { class: 'lp-tile lp-hist-ico', attrs: { style: '--c1:' + cfg.c[0] + ';--c2:' + cfg.c[1] } }, [ic(cfg.icon)]),
+                        iconCircle(cfg.icon, 'sm'),
                         el('span', { text: [T('pc_eco_t_' + tk), h.detail].filter(Boolean).join(' · ') }),
                     ]),
                     el('span', { class: 'lp-muted', text: h.by ? T('pc_eco_by', h.by) : '' }),
                     el('span', { class: 'lp-muted', text: fmtDate(h.created_at) }),
-                    el('b', { class: 'lp-right ' + (cfg.sign > 0 ? 'lp-pos' : 'lp-neg'), text: (cfg.sign > 0 ? '+' : '-') + money(amt) }),
+                    el('b', { class: 'lp-right ' + (cfg.sign > 0 ? 'lp-pos' : 'lp-neg'), text: (cfg.sign > 0 ? '+' : '−') + money(v) }),
                 ]));
             });
             histBox.appendChild(table);
         }
 
         function render() {
+            const hadFocus = document.activeElement === amountInput;
             scroll.textContent = '';
             if (failed) { scroll.appendChild(errorState(failed, load)); return; }
             scroll.appendChild(buildTop());
@@ -1870,6 +1944,14 @@
             histBox = el('div');
             scroll.appendChild(histBox);
             buildHistoryList();
+            if (hadFocus && !amountInput.disabled) amountInput.focus();
+        }
+
+        function setBalance(v) {
+            if (v === null || v === undefined || !isFinite(Number(v))) return;
+            balance = num(v);
+            if (balanceEl) balanceEl.textContent = money(balance);
+            if (S.widget) S.widget.setBalance(balance);
         }
 
         async function transfer(method) {
@@ -1878,30 +1960,41 @@
             const raw = amountInput.value;
             const n = parseInt(raw, 10);
             if (!raw || !isFinite(n) || n < 1) {
-                amountInput.classList.add('is-bad');
+                amountField.classList.add('is-bad');
                 xferMsg = { kind: 'err', text: T('pc_eco_bad_amount') };
                 render();
+                amountInput.focus();
                 return;
             }
             if (n > lim.maxTransfer) {
-                amountInput.classList.add('is-bad');
+                amountField.classList.add('is-bad');
                 xferMsg = { kind: 'err', text: T('pc_eco_max', money(lim.maxTransfer)) };
                 render();
+                amountInput.focus();
                 return;
             }
-            busy = true;
+            busy = method;
             xferMsg = null;
             render();
             const r = await rpc(method, [n]);
-            busy = false;
+            busy = null;
             if (!win.alive()) return;
             if (!r.ok) {
+                // The real reason from the server / esx_society, as Lua sent it
                 xferMsg = { kind: 'err', text: r.error };
-            } else {
-                xferMsg = { kind: 'ok', text: T(method === 'computer:deposit' ? 'pc_eco_done_deposit' : 'pc_eco_done_withdraw', money(n)) };
-                amountInput.value = '';
+                render();
+                // The balance may still have changed (e.g. esx_society was slow); show the truth
+                load(true);
+                return;
             }
-            await load(true);
+            const d = (r.data && typeof r.data === 'object') ? r.data : {};
+            const done = num(d.amount) > 0 ? num(d.amount) : n;
+            xferMsg = { kind: 'ok', text: T(method === 'computer:deposit' ? 'pc_eco_done_deposit' : 'pc_eco_done_withdraw', money(done)) };
+            amountInput.value = '';
+            setBalance(d.balance);
+            render();
+            // New history row (and the balance as the server sees it now)
+            load(true);
         }
 
         async function load(quiet) {
@@ -1909,12 +2002,14 @@
             const r = await rpc('computer:economy');
             if (!win.alive()) return;
             if (!r.ok) {
+                // A failed refresh keeps the balance and history that are shown
+                if (loadedOnce) return;
                 failed = r.error;
             } else {
                 failed = null;
                 loadedOnce = true;
-                balance = num(r.data && r.data.balance);
                 history = (r.data && Array.isArray(r.data.history)) ? r.data.history : [];
+                setBalance(r.data && r.data.balance);
             }
             render();
         }
@@ -1926,6 +2021,12 @@
     // ---------------------------------------------------------------------------------------------
     // App: Prisliste (price list, chef only)
     // ---------------------------------------------------------------------------------------------
+
+    // Sidebar glyphs of the price groups (Config.Cosmetic.groups ids)
+    const GROUP_ICON = {
+        bodywork: 'car-side', wheels: 'circle-dot', respray: 'spray-can', interior: 'couch',
+        engine: 'gears', lights: 'lightbulb', plates: 'car-rear', other: 'ellipsis', wash: 'soap',
+    };
 
     function mountPrices(win) {
         let rows = [];
@@ -1940,14 +2041,14 @@
         let rowEls = {};
 
         const side = el('aside', { class: 'lp-side' });
-        const alertBox = el('div');
+        const alertBox = el('div', { class: 'lp-alert-wrap' });
         const listBox = el('div', { class: 'lp-scroll' });
         const saveBar = el('div', { class: 'lp-savebar' });
         const main = el('div', { class: 'lp-main' }, [alertBox, listBox, saveBar]);
         win.body.append(side, main);
 
         const search = searchBox((v) => { q = v.trim().toLowerCase(); renderList(); });
-        const refreshBtn = el('button', { class: 'lp-btn icon', attrs: { type: 'button', title: T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
+        const refreshBtn = el('button', { class: 'lp-btn icon ghost', attrs: { type: 'button', title: T('pc_refresh'), 'aria-label': T('pc_refresh') }, on: { click: () => load() } }, [ic('arrows-rotate')]);
         win.tools.append(search.node, refreshBtn);
 
         const maxPrice = () => limits().maxPrice;
@@ -1976,7 +2077,7 @@
             );
             groupOrder.forEach((g) => {
                 const inG = rows.filter((r) => r.group === g);
-                side.appendChild(sideItem('folder', groupLabel(inG[0]), inG.length, filter === 'group:' + g, () => setFilter('group:' + g)));
+                side.appendChild(sideItem(GROUP_ICON[g] || 'folder', groupLabel(inG[0]), inG.length, filter === 'group:' + g, () => setFilter('group:' + g)));
             });
         }
 
@@ -1991,7 +2092,7 @@
             if (!e) return;
             const r = e.row;
             const n = parsed(id);
-            e.input.classList.toggle('is-bad', isNaN(n));
+            e.field.classList.toggle('is-bad', isNaN(n));
             e.el.classList.toggle('is-changed', !isNaN(n) && n !== r.price);
             e.reset.hidden = !(isNaN(n) || n !== r.default);
         }
@@ -2000,12 +2101,13 @@
             const ch = changedRows().length;
             const bad = invalidRows().length;
             saveBar.textContent = '';
-            const label = bad ? T('pc_prices_invalid', maxPrice()) : (ch === 0 ? T('pc_prices_none') : (ch === 1 ? T('pc_prices_one') : T('pc_prices_many', ch)));
+            const label = bad ? T('pc_prices_invalid', groupNum(maxPrice())) : (ch === 0 ? T('pc_prices_none') : (ch === 1 ? T('pc_prices_one') : T('pc_prices_many', ch)));
             const discard = el('button', { class: 'lp-btn', text: T('pc_prices_discard'), attrs: { type: 'button' }, on: { click: discardAll } });
-            const save = el('button', { class: 'lp-btn primary', attrs: { type: 'button' }, on: { click: save_ } }, [ic(saving ? 'spinner' : 'floppy-disk', saving ? 'fa-spin' : ''), T('pc_prices_save')]);
+            const save = el('button', { class: 'lp-btn primary', attrs: { type: 'button' }, on: { click: save_ } },
+                saving ? [el('span', { class: 'lp-spin', attrs: { style: 'width:1em;height:1em;border-width:0.13em' } }), T('pc_prices_save')] : [T('pc_prices_save')]);
             discard.disabled = saving || (ch === 0 && !bad);
             save.disabled = saving || ch === 0 || bad > 0;
-            saveBar.append(el('span', { class: 'grow', text: label }), discard, save);
+            saveBar.append(el('span', { class: 'grow' + (bad ? ' is-bad' : ''), text: label }), discard, save);
             const side0 = side.querySelectorAll('.lp-side-item .count');
             if (side0[1]) side0[1].textContent = String(ch);
         }
@@ -2033,11 +2135,12 @@
                 if (filter === 'all' || filter === 'changed') {
                     if (r.group !== lastGroup) { table.appendChild(el('div', { class: 'lp-groupbar', text: groupLabel(r) })); lastGroup = r.group; }
                 }
-                const input = el('input', { class: 'lp-input lp-price-in', attrs: { type: 'text', inputmode: 'numeric', maxlength: '7', autocomplete: 'off', 'aria-label': r.label } });
+                const input = el('input', { attrs: { type: 'text', inputmode: 'numeric', maxlength: '7', autocomplete: 'off', 'aria-label': r.label } });
                 input.value = raw[r.id];
-                input.style.textAlign = 'right';
-                const reset = el('button', { class: 'lp-btn sm icon', attrs: { type: 'button', title: T('pc_prices_reset_row') }, on: { click: () => { raw[r.id] = String(r.default); input.value = raw[r.id]; updateRow(r.id); updateFooter(); } } }, [ic('rotate-left')]);
-                const field = el('div', { class: 'lp-money-input' }, [el('span', { text: '$' }), input]);
+                const reset = el('button', { class: 'lp-btn sm icon ghost', attrs: { type: 'button', title: T('pc_prices_reset_row'), 'aria-label': T('pc_prices_reset_row') }, on: { click: () => { raw[r.id] = String(r.default); input.value = raw[r.id]; updateRow(r.id); updateFooter(); } } }, [ic('rotate-left')]);
+                const field = el('label', { class: 'lp-money-input lp-price-in' }, [el('span', { text: '$' }), input]);
+                input.addEventListener('focus', () => field.classList.add('is-focus'));
+                input.addEventListener('blur', () => field.classList.remove('is-focus'));
                 const row = el('div', { class: 'lp-trow' }, [
                     el('div', { class: 'name' }, [el('span', { text: r.label })]),
                     el('span', { class: 'lp-right lp-muted', text: money(r.default) }),
@@ -2051,7 +2154,7 @@
                     updateFooter();
                 });
                 input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); input.blur(); } });
-                rowEls[r.id] = { el: row, input, reset, row: r };
+                rowEls[r.id] = { el: row, input, field, reset, row: r };
                 table.appendChild(row);
                 updateRow(r.id);
             });
@@ -2123,7 +2226,6 @@
             beforeClose() {
                 if (!changedRows().length || failed) return true;
                 winSheet(win, {
-                    icon: 'tags',
                     title: T('pc_prices_unsaved_title'),
                     text: T('pc_prices_unsaved_text'),
                     buttons: [
@@ -2152,12 +2254,12 @@
     // ---------------------------------------------------------------------------------------------
 
     const APPS = [
-        { id: 'stock', key: 'pc_app_stock', icon: 'boxes-stacked', c: ['#ffb340', '#f06a00'], size: [72, 46], min: [42, 26], mount: mountStock },
-        { id: 'order', key: 'pc_app_order', icon: 'cart-shopping', c: ['#52d97b', '#1b9e44'], size: [82, 48], min: [52, 28], mount: mountOrder },
-        { id: 'orders', key: 'pc_app_orders', icon: 'truck-fast', c: ['#5ac8fa', '#0a6fe0'], size: [64, 44], min: [40, 24], mount: mountOrders },
-        { id: 'staff', key: 'pc_app_staff', icon: 'users', c: ['#c77dff', '#7d3cc4'], size: [68, 44], min: [44, 24], boss: true, mount: mountStaff },
-        { id: 'eco', key: 'pc_app_eco', icon: 'chart-line', c: ['#40e0c8', '#0d8f86'], size: [70, 48], min: [46, 28], boss: true, mount: mountEco },
-        { id: 'prices', key: 'pc_app_prices', icon: 'tags', c: ['#ff7a9c', '#d6264f'], size: [68, 48], min: [46, 26], boss: true, mount: mountPrices },
+        { id: 'stock', key: 'pc_app_stock', icon: 'boxes-stacked', size: [72, 46], min: [42, 26], mount: mountStock },
+        { id: 'order', key: 'pc_app_order', icon: 'cart-shopping', size: [82, 48], min: [52, 28], mount: mountOrder },
+        { id: 'orders', key: 'pc_app_orders', icon: 'truck-fast', size: [64, 44], min: [40, 24], mount: mountOrders },
+        { id: 'staff', key: 'pc_app_staff', icon: 'users', size: [68, 44], min: [44, 24], boss: true, mount: mountStaff },
+        { id: 'eco', key: 'pc_app_eco', icon: 'building-columns', size: [70, 48], min: [46, 28], boss: true, mount: mountEco },
+        { id: 'prices', key: 'pc_app_prices', icon: 'tags', size: [68, 48], min: [46, 26], boss: true, mount: mountPrices },
     ];
 
     // ---------------------------------------------------------------------------------------------
@@ -2254,12 +2356,14 @@
 
             const bossOnly = new Set(['computer:staff', 'computer:nearby', 'computer:hire', 'computer:setGrade', 'computer:fire', 'computer:economy', 'computer:deposit', 'computer:withdraw', 'computer:prices', 'computer:setPrices']);
             const ok = (data) => ({ ok: true, data });
-            const fail = (error) => ({ ok: false, error });
+            // error = the translated text Lua sends, code = the locale key (as client/computer.lua answers)
+            const fail = (error, code) => ({ ok: false, error, code: code || null });
+            let cash = 50000;
 
             return async function (method, args) {
                 await new Promise((r) => setTimeout(r, 120));
-                if (window.__demoFail) return fail('Serveren svarer ikke.');
-                if (bossOnly.has(method) && !isBoss) return fail('Kun chefen kan bruge denne app.');
+                if (window.__demoFail) return fail('Noget gik galt.', 'error');
+                if (bossOnly.has(method) && !isBoss) return fail('Kun chefen kan gøre det.', 'pc_not_boss');
                 switch (method) {
                     case 'stock:get':
                         return ok({ workshop: 'bennys', label: "Benny's lager", items: Object.keys(stock).filter((k) => stock[k] > 0).map((k) => ({ name: k, label: NAMES[k], count: stock[k] })) });
@@ -2300,15 +2404,21 @@
                         return ok(true);
                     case 'computer:economy':
                         return ok({ balance, history: history.slice() });
+                    // Same answer shape as the esx_society flow in client/computer.lua: { kind, amount, balance }
                     case 'computer:deposit':
+                        await new Promise((r) => setTimeout(r, 500));
+                        if (args[0] > cash) return fail('Du har ikke penge nok på din bankkonto.', 'pc_no_money');
+                        cash -= args[0];
                         balance += args[0];
-                        history.unshift({ type: 'deposit', amount: args[0], by: 'Mikkel Jensen', detail: '', created_at: Date.now() });
-                        return ok(true);
+                        history.unshift({ type: 'deposit', amount: args[0], by: 'Mikkel Jensen', detail: "Benny's Original Motor Works", created_at: Date.now() });
+                        return ok({ kind: 'deposit', amount: args[0], balance });
                     case 'computer:withdraw':
-                        if (args[0] > balance) return fail('Firmakontoen har ikke nok penge.');
+                        await new Promise((r) => setTimeout(r, 500));
+                        if (args[0] > balance) return fail('Firmakontoen har ikke penge nok.', 'pc_society_no_money');
                         balance -= args[0];
-                        history.unshift({ type: 'withdraw', amount: args[0], by: 'Mikkel Jensen', detail: '', created_at: Date.now() });
-                        return ok(true);
+                        cash += args[0];
+                        history.unshift({ type: 'withdraw', amount: args[0], by: 'Mikkel Jensen', detail: "Benny's Original Motor Works", created_at: Date.now() });
+                        return ok({ kind: 'withdraw', amount: args[0], balance });
                     case 'computer:prices':
                         return ok(prices.map((p) => Object.assign({}, p)));
                     case 'computer:setPrices': {
@@ -2334,7 +2444,7 @@
                     gradeLabel: boss ? 'Chef' : 'Mekaniker',
                     isBoss: boss,
                     workshop: { id: 'bennys', label: "Benny's Original Motor Works" },
-                    shop: { deliveryMinutes: 5 },
+                    shop: { deliveryMinutes: 5, maxPerLine: boss ? 20 : 2, maxLines: boss ? 15 : 1, maxTransfer: 1000000, maxPrice: 250000 },
                 },
             }, '*');
         };

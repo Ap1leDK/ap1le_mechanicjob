@@ -587,17 +587,6 @@ end
 -- older versions return nothing, which counts as success, exactly like esx_society/esx_billing do).
 -- ---------------------------------------------------------------------------------------------
 
--- > 0 while this resource itself moves society money, so the esx_addonaccount:addMoney/removeMoney
--- events that esx_addonaccount fires synchronously from inside the call are not mistaken for a
--- chef's esx_society deposit/withdraw (see server/computer.lua)
-local internalMoves = 0
-
----True while this resource is moving society money itself.
----@return boolean
-function Mechanic.SocietyInternalMove()
-    return internalMoves > 0
-end
-
 ---The society shared account object (a copy with function references), or nil.
 ---@return table|nil
 function Mechanic.GetSociety()
@@ -619,9 +608,7 @@ end
 ---Call removeMoney/addMoney on the account. Only the call's own result is checked (see above).
 ---@return boolean
 local function societyCall(account, fn, amount)
-    internalMoves = internalMoves + 1
     local ok, result = pcall(account[fn], amount)
-    internalMoves = internalMoves - 1
 
     if not ok or result == false then
         print(('[ap1le_mechanicjob] %s(%d) on society "%s" failed (%s)'):format(fn, amount, Config.Invoice.society, tostring(result)))
@@ -666,10 +653,85 @@ function Mechanic.SocietyAdd(amount)
     return societyCall(account, 'addMoney', amount)
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- esx_society version gate
+--
+-- esx_society only checks the boss grade (Config.BossGrades, grade NAME) on esx_society:withdrawMoney,
+-- washMoney and getSocietyMoney since esx_addons 1.15.0 (commit faba9ef "fix different
+-- vulnerabilities"). Up to 1.14.x withdrawMoney only checks `xPlayer.getJob().name == society.name`
+-- and the account balance, so ANY employee (a grade 0 recruit hired from our laptop) could fire
+-- TriggerServerEvent('esx_society:withdrawMoney', 'mechanic', <balance>) and empty the society into
+-- their cash, skipping our chef rule, the computer distance check and Config.Computer.maxTransfer.
+--
+-- Mechanic.SocietySafe = true only when the installed esx_society's `legacyversion` is >= 1.15.0.
+-- When false (older or unknown version, or esx_society missing):
+--   * this resource does NOT register Config.Job with esx_society (so esx_society's events find no
+--     society and move nothing, unless another resource registered it: then a console warning is printed);
+--   * the laptop is unaffected: its deposit/withdraw always move the money server-side.
+-- ---------------------------------------------------------------------------------------------
+
+local SOCIETY_SAFE_VERSION = { 1, 15, 0 }
+
+Mechanic.SocietySafe = false
+
+local societyVersionWarned = nil
+
+---{ major, minor, patch } from a version string such as "1.16.3", or nil.
+---@param text any
+---@return integer[]|nil
+local function parseVersion(text)
+    if type(text) ~= 'string' then return nil end
+    local major, minor, patch = text:match('^%s*v?(%d+)%.(%d+)%.?(%d*)')
+    if not major then return nil end
+    return { tonumber(major), tonumber(minor), tonumber(patch) or 0 }
+end
+
+---Re-read esx_society's version and update Mechanic.SocietySafe. Warns once per version string.
+---@return boolean safe
+function Mechanic.CheckSocietyVersion()
+    local raw = GetResourceMetadata('esx_society', 'legacyversion', 0)
+    local version = parseVersion(raw)
+
+    local safe = false
+    if version then
+        for i = 1, 3 do
+            if version[i] ~= SOCIETY_SAFE_VERSION[i] then
+                safe = version[i] > SOCIETY_SAFE_VERSION[i]
+                break
+            end
+            if i == 3 then safe = true end
+        end
+    end
+
+    Mechanic.SocietySafe = safe
+
+    local seen = tostring(raw)
+    if not safe and societyVersionWarned ~= seen then
+        societyVersionWarned = seen
+        print(('^1[ap1le_mechanicjob] WARNING: esx_society %s < 1.15.0 lets EVERY employee withdraw from the society. '
+            .. 'Update esx_addons (esx_society >= 1.15.0). Until then this resource does not register "%s" with '
+            .. 'esx_society. The laptop is not affected: it moves deposits/withdrawals itself.^0')
+            :format(raw and ('"' .. raw .. '"') or '(version unknown)', Config.Job))
+    end
+
+    return safe
+end
+
 ---Register Config.Job as a society with esx_society (the standard ESX job setup, as esx_mechanicjob
 ---does), so the chef can use esx_society's deposit/withdraw/balance. Skipped when another resource
----(e.g. esx_mechanicjob) already registered it.
+---(e.g. esx_mechanicjob) already registered it, and when esx_society is older than 1.15.0 (see above).
 local function registerSociety()
+    if not Mechanic.CheckSocietyVersion() then
+        local registered
+        TriggerEvent('esx_society:getSociety', Config.Job, function(society) registered = society end)
+        if registered then
+            print(('^1[ap1le_mechanicjob] WARNING: another resource registered "%s" with this old esx_society; '
+                .. 'its withdrawMoney event is open to every employee. Update esx_society to 1.15.0 or newer.^0')
+                :format(Config.Job))
+        end
+        return
+    end
+
     local existing
     TriggerEvent('esx_society:getSociety', Config.Job, function(society) existing = society end)
     if existing then return end

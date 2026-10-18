@@ -643,26 +643,11 @@ lib.callback.register('ap1le_mechanicjob:computer:economy', function(source)
     return true, { balance = balance, history = history }
 end)
 
--- Deposit/withdraw use esx_society, the standard ESX society API (user request, v3 A1):
---   1. client: computer:deposit / computer:withdraw (amount) -> our checks (chef at the computer, amount,
---      cash / society balance, esx_society's boss rule). Returns { society, amount, kind } and records
---      the chef's intent.
---   2. client: TriggerServerEvent('esx_society:depositMoney' | 'esx_society:withdrawMoney', society, amount)
---      -> esx_society checks again and moves the money between the chef's cash and the society account.
---   3. client: computer:transferResult (kind) -> waits briefly until esx_addonaccount reported the
---      matching society change, then returns the new balance. Matched transfers are logged in
---      ap1le_mechanicjob_transactions for the economy history, as in v2.
--- esx_society moves CASH (xPlayer.getMoney/addMoney/removeMoney), so Config.Computer.account is not used.
-
--- esx_society only lets job grades whose NAME is in its Config.BossGrades withdraw (default: 'boss').
--- Its config is not readable from here, so the default is mirrored. Depositing only needs the job.
-local SOCIETY_BOSS_GRADE_NAMES = { boss = true }
-
-local TRANSFER_WINDOW_MS = 5000   -- an intent matches a society change for this long
-local TRANSFER_WAIT_STEPS = 30    -- computer:transferResult waits at most 30 x 100 ms
-
--- [source] = { kind, amount, at, identifier, name, source, workshop, confirmed }
-local intents = {}
+-- Deposit/withdraw (v3 A1). The money is moved here on the server with the standard ESX calls:
+-- xPlayer.addAccountMoney/removeAccountMoney for the chef and esx_addonaccount:getSharedAccount for the
+-- society (the same pattern esx_society and esx_billing use internally). The client never fires
+-- esx_society's net events, so our chef rule, the computer distance check and Config.Computer.maxTransfer
+-- always apply, whatever esx_society version the server runs.
 
 ---Shared checks for deposit/withdraw. Returns xPlayer, workshop, amount or nil + locale key.
 local function transferArgs(source, amount, key)
@@ -675,7 +660,7 @@ local function transferArgs(source, amount, key)
     end
 
     if not Mechanic.GetSociety() then
-        print(('[ap1le_mechanicjob] society account "%s" not found (run sql/install.sql, then restart esx_addonaccount and esx_society)')
+        print(('[ap1le_mechanicjob] society account "%s" not found (run sql/install.sql, then restart esx_addonaccount)')
             :format(Config.Invoice.society))
         return nil, 'error'
     end
@@ -683,106 +668,48 @@ local function transferArgs(source, amount, key)
     return xPlayer, workshop, math.tointeger(amount)
 end
 
----Cash of an xPlayer (esx_society moves cash), or 0.
-local function playerCash(xPlayer)
-    local ok, money = pcall(xPlayer.getMoney)
-    return (ok and type(money) == 'number') and money or 0
-end
-
----Record what the chef is about to do, so the matching society change can be logged.
-local function recordIntent(source, xPlayer, workshop, kind, amount)
-    intents[source] = {
-        kind = kind,
-        amount = amount,
-        at = GetGameTimer(),
-        identifier = xPlayer.identifier,
-        name = Mechanic.PlayerName(xPlayer),
-        source = source,
-        workshop = workshop.id,
-        confirmed = false,
-    }
-end
-
 lib.callback.register('ap1le_mechanicjob:computer:deposit', function(source, amount)
     local xPlayer, workshop, value = transferArgs(source, amount, 'computer:deposit')
     if not xPlayer then return false, workshop end
 
-    if playerCash(xPlayer) < value then return false, 'pc_no_money' end
+    local accountName = Config.Computer.account
+    local account = xPlayer.getAccount(accountName)
+    if not account or type(account.money) ~= 'number' or account.money < value then return false, 'pc_no_money' end
 
-    recordIntent(source, xPlayer, workshop, 'deposit', value)
-    return true, { kind = 'deposit', society = Config.Job, amount = value }
+    if not Mechanic.MovePlayerMoney(xPlayer, accountName, value, false, 'ap1le_mechanicjob society deposit') then
+        return false, 'error'
+    end
+
+    if not Mechanic.SocietyAdd(value) then
+        if not Mechanic.MovePlayerMoney(xPlayer, accountName, value, true, 'ap1le_mechanicjob society deposit refund') then
+            print(('[ap1le_mechanicjob] DEPOSIT REFUND FAILED: %d taken from %s'):format(value, xPlayer.identifier))
+        end
+        return false, 'error'
+    end
+
+    Mechanic.LogTransaction(workshop.id, 'deposit', value, xPlayer)
+    return true, { kind = 'deposit', amount = value, balance = Mechanic.SocietyBalance() }
 end)
 
 lib.callback.register('ap1le_mechanicjob:computer:withdraw', function(source, amount)
     local xPlayer, workshop, value = transferArgs(source, amount, 'computer:withdraw')
     if not xPlayer then return false, workshop end
 
-    if not SOCIETY_BOSS_GRADE_NAMES[xPlayer.job.grade_name] then return false, 'pc_society_boss_only' end
+    local accountName = Config.Computer.account
+    if not xPlayer.getAccount(accountName) then return false, 'error' end
 
-    local balance = Mechanic.SocietyBalance()
-    if not balance then return false, 'error' end
-    if balance < value then return false, 'pc_society_no_money' end
+    local removed, err = Mechanic.SocietyRemove(value)
+    if not removed then return false, err == 'order_no_money' and 'pc_society_no_money' or 'error' end
 
-    recordIntent(source, xPlayer, workshop, 'withdraw', value)
-    return true, { kind = 'withdraw', society = Config.Job, amount = value }
-end)
-
-lib.callback.register('ap1le_mechanicjob:computer:transferResult', function(source, kind)
-    if kind ~= 'deposit' and kind ~= 'withdraw' then
-        Mechanic.Flag(source, 'computer:transferResult with an invalid kind')
+    if not Mechanic.MovePlayerMoney(xPlayer, accountName, value, true, 'ap1le_mechanicjob society withdraw') then
+        if not Mechanic.SocietyAdd(value) then
+            print(('[ap1le_mechanicjob] WITHDRAW REFUND FAILED: %d taken from "%s"'):format(value, Config.Invoice.society))
+        end
         return false, 'error'
     end
-    if not Mechanic.RateLimit(source, 'computer:transferResult', 500) then return false, 'too_fast' end
 
-    local intent = intents[source]
-    if not intent or intent.kind ~= kind then return false, 'pc_transfer_failed' end
-
-    -- The esx_society event was sent before this callback on the same ordered channel, so it has
-    -- normally been handled already; wait a moment for a slow esx_society/esx_addonaccount anyway.
-    for _ = 1, TRANSFER_WAIT_STEPS do
-        if intent.confirmed or intents[source] ~= intent then break end
-        Wait(100)
-    end
-
-    if intents[source] == intent then intents[source] = nil end
-    if not intent.confirmed then return false, 'pc_transfer_failed' end
-
-    return true, { kind = kind, amount = intent.amount, balance = Mechanic.SocietyBalance() }
-end)
-
----esx_addonaccount fires esx_addonaccount:addMoney / removeMoney (name, amount, owner) after every
----real change of an account. A change of our society that this resource did not make itself and that
----matches an open intent (same kind and amount, within TRANSFER_WINDOW_MS) is that chef's transfer.
----These are local server events: a client can never trigger them here (no RegisterNetEvent).
-local function onSocietyChange(kind)
-    return function(name, amount, owner)
-        if name ~= Config.Invoice.society or owner ~= nil or Mechanic.SocietyInternalMove() then return end
-        amount = math.tointeger(tonumber(amount))
-        if not amount then return end
-
-        local now, best = GetGameTimer(), nil
-        for _, intent in pairs(intents) do
-            if not intent.confirmed and intent.kind == kind and intent.amount == amount
-                and now - intent.at <= TRANSFER_WINDOW_MS and (not best or intent.at < best.at) then
-                best = intent
-            end
-        end
-        if not best then return end
-
-        best.confirmed = true
-        Mechanic.LogTransaction(best.workshop, kind, amount, {
-            identifier = best.identifier,
-            source = best.source,
-            getName = function() return best.name end,
-        })
-    end
-end
-
-AddEventHandler('esx_addonaccount:addMoney', onSocietyChange('deposit'))
-AddEventHandler('esx_addonaccount:removeMoney', onSocietyChange('withdraw'))
-
-AddEventHandler('playerDropped', function()
-    intents[source] = nil
+    Mechanic.LogTransaction(workshop.id, 'withdraw', value, xPlayer)
+    return true, { kind = 'withdraw', amount = value, balance = Mechanic.SocietyBalance() }
 end)
 
 -- ---------------------------------------------------------------------------------------------

@@ -16,6 +16,9 @@
 ['tyre'] = { label = 'Spare tyre', weight = 8000, stack = true, close = true, description = 'A replacement tyre for changing a damaged wheel.' },
 ['repair_kit'] = { label = 'Repair kit', weight = 2000, stack = true, close = true, description = 'Quick field repair for the engine, usable anywhere.' },
 
+-- Car wash (Config.Wash)
+['cleaning_kit'] = { label = 'Cleaning kit', weight = 1500, stack = true, close = true, description = 'Bucket, sponge and cleaner for washing a vehicle.' },
+
 -- Performance: engine (Config.Performance.engine)
 ['engine_lvl1'] = { label = 'Engine upgrade Level 1', weight = 25000, stack = true, close = true, description = 'Engine block upgrade, stage 1.' },
 ['engine_lvl2'] = { label = 'Engine upgrade Level 2', weight = 25000, stack = true, close = true, description = 'Engine block upgrade, stage 2.' },

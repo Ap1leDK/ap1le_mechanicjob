@@ -409,6 +409,10 @@ lib.callback.register('ap1le_mechanicjob:terminal:open', function(source, netId)
 end)
 
 ---Notify the mechanics who are inside a workshop right now.
+-- [plate] = GetGameTimer() of the last 'new work order' notification
+local workOrderNotifiedAt = {}
+local WORKORDER_NOTIFY_MS = 60000
+
 local function notifyWorkshop(workshop, msg)
     local ok, players = pcall(ESX.GetExtendedPlayers, 'job', Config.Job)
     if not ok or type(players) ~= 'table' then return end
@@ -462,7 +466,13 @@ lib.callback.register('ap1le_mechanicjob:workorder:save', function(source, netId
     end
 
     Mechanic.RateLimitMark(source, 'workorder:save')
-    notifyWorkshop(workshop, locale('workorder_new', plate))
+    -- Tell the mechanics about a new work order, but at most once a minute per plate, so a customer
+    -- re-sending (or a script spamming) workorder:save cannot flood every mechanic with notifications
+    local now = GetGameTimer()
+    if now - (workOrderNotifiedAt[plate] or -WORKORDER_NOTIFY_MS) >= WORKORDER_NOTIFY_MS then
+        workOrderNotifiedAt[plate] = now
+        notifyWorkshop(workshop, locale('workorder_new', plate))
+    end
 
     return true, { plate = plate, expires_at = expiresAt }
 end)

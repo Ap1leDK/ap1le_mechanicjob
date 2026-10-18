@@ -3,8 +3,7 @@
 -- ox_target "use computer" option. Opening: server check -> Anim.Laptop (walk up and type) -> scripted
 -- camera on the screen -> NUI focus -> 'laptop:open'. The laptop NUI talks to the server only through
 -- 'laptop:request', which forwards a whitelist of callbacks (the server re-checks job, grade and distance
--- on every call). The society deposit/withdraw go through the standard esx_society events (see
--- societyTransfer below).
+-- on every call). The society deposit/withdraw are moved by the server (see societyTransfer below).
 -- Terminal: a kiosk per workshop (ox_target for everyone) that opens the tuning screen in design mode
 -- on the player's own nearby vehicle (Tuning.OpenDesign).
 
@@ -226,97 +225,27 @@ local function normalise(value, depth)
 end
 
 -- ---------------------------------------------------------------------------
--- Society deposit / withdraw (standard esx_society)
+-- Society deposit / withdraw
 -- ---------------------------------------------------------------------------
--- Why: our own society code failed on deposits (v2). The money is now moved by esx_society's own server
--- events (esx_society:depositMoney / withdrawMoney), which only exist as net events, so the chef's client
--- has to trigger them. Because a client could skip our checks, the flow is guarded by the server:
---   1. computer:deposit / computer:withdraw (amount) -> chef at the computer, amount, cash / society
---      balance, esx_society's boss rule. Returns { kind, society, amount } and remembers the intent.
---   2. TriggerServerEvent('esx_society:depositMoney' | 'esx_society:withdrawMoney', society, amount)
---      with the amount the SERVER returned.
---   3. computer:transferResult (kind) -> the server waits until esx_addonaccount reported the matching
---      change of the society account, logs it, and returns the balance.
---   4. The new balance is read with the standard esx_society callback (esx_society:getSocietyMoney); when
---      that answers 0 for a grade that esx_society does not count as boss, the server's balance is used.
+-- The server moves the money itself (ESX account + esx_addonaccount shared account) after its chef,
+-- distance and amount checks, and answers { kind, amount, balance }.
 
-local TRANSFERS = {
-    ['computer:deposit'] = { kind = 'deposit', event = 'esx_society:depositMoney' },
-    ['computer:withdraw'] = { kind = 'withdraw', event = 'esx_society:withdrawMoney' },
-}
-
-local BALANCE_TIMEOUT_MS = 3000
 local transferring = false
-
----Society balance through esx_society's own callback, or nil when it does not answer.
----@param society string
----@return number?
-local function societyBalance(society)
-    local answer = promise.new()
-    local settled = false
-
-    local function settle(value)
-        if settled then return end
-        settled = true
-        answer:resolve(value)
-    end
-
-    local called = pcall(function()
-        if ESX.TriggerServerCallback then
-            ESX.TriggerServerCallback('esx_society:getSocietyMoney', settle, society)
-        else
-            settle(nil)
-        end
-    end)
-    if not called then settle(nil) end
-
-    SetTimeout(BALANCE_TIMEOUT_MS, function() settle(nil) end)
-
-    return tonumber(Citizen.Await(answer))
-end
 
 ---Run one deposit or withdrawal. Returns ok, data ({ kind, amount, balance }) or false, locale key.
 ---@param method string 'computer:deposit' | 'computer:withdraw'
 ---@param args table
 ---@return boolean, any
 local function societyTransfer(method, args)
-    local transfer = TRANSFERS[method]
-
     if transferring then return false, 'too_fast' end
     transferring = true
-
-    local ok, success, result = pcall(function()
-        local allowed, intent = lib.callback.await('ap1le_mechanicjob:' .. method, false, args[1])
-        if not allowed then return false, intent end
-
-        local amount = type(intent) == 'table' and math.tointeger(tonumber(intent.amount))
-        if not amount or amount < 1 then return false, 'error' end
-
-        local society = (type(intent) == 'table' and type(intent.society) == 'string') and intent.society or Config.Job
-
-        TriggerServerEvent(transfer.event, society, amount)
-
-        local confirmed, outcome = lib.callback.await('ap1le_mechanicjob:computer:transferResult', false, transfer.kind)
-        if not confirmed then return false, outcome end
-
-        local serverBalance = type(outcome) == 'table' and tonumber(outcome.balance) or nil
-        local balance = societyBalance(society)
-
-        -- esx_society answers 0 for grades that are not in its boss list: trust the server's number then
-        if balance == nil or (balance == 0 and serverBalance and serverBalance > 0) then
-            balance = serverBalance
-        end
-
-        return true, { kind = transfer.kind, amount = amount, balance = balance }
-    end)
-
+    local ok, success, result = pcall(lib.callback.await, 'ap1le_mechanicjob:' .. method, false, args[1])
     transferring = false
 
     if not ok then
-        print(('^1[ap1le_mechanicjob] society %s failed: %s^0'):format(transfer.kind, tostring(success)))
+        print(('^1[ap1le_mechanicjob] %s failed: %s^0'):format(method, tostring(success)))
         return false, 'error'
     end
-
     return success, result
 end
 
@@ -352,7 +281,7 @@ RegisterNUICallback('laptop:request', function(data, cb)
 
     local ok, result
 
-    if TRANSFERS[method] then
+    if method == 'computer:deposit' or method == 'computer:withdraw' then
         ok, result = societyTransfer(method, args)
     else
         ok, result = lib.callback.await('ap1le_mechanicjob:' .. method, false, table.unpack(args, 1, 4))
@@ -545,8 +474,16 @@ local function useTerminal()
 
     local vehicle = cache.vehicle
 
+    -- Prefer the vehicle the player last drove (almost always their own car) over whatever happens to
+    -- stand closest, so an NPC car parked nearer does not make the terminal answer "not your vehicle"
     if not vehicle then
-        vehicle = lib.getClosestVehicle(GetEntityCoords(cache.ped), Config.MaxVehicleDistance, false)
+        local coords = GetEntityCoords(cache.ped)
+        local last = GetVehiclePedIsIn(cache.ped, true)
+        if last ~= 0 and DoesEntityExist(last) and #(GetEntityCoords(last) - coords) <= Config.MaxVehicleDistance then
+            vehicle = last
+        else
+            vehicle = lib.getClosestVehicle(coords, Config.MaxVehicleDistance, false)
+        end
     end
 
     -- Tell the player what to do instead of failing silently. Whether it is THEIR vehicle is checked by the
