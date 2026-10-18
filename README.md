@@ -110,7 +110,7 @@ En bestilling fungerer sådan:
 1. Mekanikeren vælger varer og antal. Serveren tjekker varerne mod `Config.Shop.items`, antal og linjer, og at
    værkstedet ikke har for mange åbne ordrer. Prisen tages fra konfigurationen, ikke fra spilleren.
    Mekanikere under chef-graden kan kun bestille små ordrer: 1 slags vare, højst 2 stk., højst $30.000 pr. ordre
-   og højst 2 åbne ordrer ad gangen (konstanterne `STAFF_MAX_*` øverst i `server/stock.lua`). Chefen har de fulde
+   og højst 2 åbne ordrer ad gangen (`Config.Shop.staffLimits` i `config.lua`). Chefen har de fulde
    grænser fra `Config.Shop`.
 2. Virksomhedskontoen betaler summen. Hvis den ikke har penge nok, bliver bestillingen afvist.
 3. Ordren står som "på vej" i `Config.Shop.deliveryMinutes`. I den tid ser alle mekanikere ordrerne i
