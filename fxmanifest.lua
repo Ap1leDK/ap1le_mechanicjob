@@ -6,7 +6,7 @@ use_experimental_fxv2_oal 'yes'
 name 'ap1le_mechanicjob'
 author 'Ap1leDK'
 description 'Mekanikerjob: reparation, fysiske del-skift, tuning, lager og bestilling, chefens computer, bugsering og fakturaer'
-version '2.0.0'
+version '3.0.0'
 
 shared_scripts {
     '@ox_lib/init.lua',
@@ -26,6 +26,8 @@ client_scripts {
     'client/towing.lua',
     'client/stock.lua',
     'client/computer.lua',
+    'client/presets.lua',
+    'client/wash.lua',
 }
 
 server_scripts {
@@ -37,6 +39,8 @@ server_scripts {
     'server/billing.lua',
     'server/stock.lua',
     'server/computer.lua',
+    'server/presets.lua',
+    'server/wash.lua',
 }
 
 ui_page 'html/index.html'
@@ -48,4 +52,4 @@ files {
     'html/js/*.js',
 }
 
-dependencies { 'es_extended', 'ox_lib', 'oxmysql', 'ox_inventory', 'ox_target', 'esx_addonaccount', 'ap1le_core' }
+dependencies { 'es_extended', 'ox_lib', 'oxmysql', 'ox_inventory', 'ox_target', 'esx_addonaccount', 'esx_society', 'ap1le_core' }

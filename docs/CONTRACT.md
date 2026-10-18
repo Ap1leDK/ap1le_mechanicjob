@@ -269,3 +269,128 @@ Esc or the red traffic light of the last window, or a "Luk computer" menu item, 
 ## 8. Locale
 
 Danish first. Docs dev produces both files from the keys found in the code afterwards.
+
+---
+
+# v3: user feedback after in-game testing (binding, overrides v2 where it conflicts)
+
+The user tested v2 in game. Everything below is a reported bug or a requested feature. Keep all
+other v2 behaviour. Owners as in v2 section 1, plus the new files listed here.
+
+## A. Bugs (each must be root-caused, not papered over)
+
+| # | Bug as reported | Owner |
+|---|---|---|
+| A1 | Depositing money to the society from the laptop shows an error. Use standard ESX instead of our own society code: **esx_society** for laptop deposit/withdraw/balance (`esx_society:depositMoney` / `esx_society:withdrawMoney` server events triggered by the chef's client, balance via the `esx_society:getSocietyMoney` server callback; read the real esx_society source to get exact names/args and its boss check, which uses `grade_name == 'boss'`). On start, register the society with esx_society (`esx_society:registerSociety` for Config.Job / Config.Invoice.society) if that is the standard way. For server-side society moves (orders, invoice share) use the standard `esx_addonaccount:getSharedAccount` pattern without the extra after-the-fact balance comparison that can falsely fail (check `account.money >= x` before removeMoney; that is it). Also log transactions as before. Note in README: after running the SQL, restart esx_addonaccount/esx_society (or the server), otherwise the new shared account is not loaded. | server + laptop NUI + business client |
+| A2 | Tuning UI is not centred; some parts look relatively positioned (layout shifts). | tuning NUI |
+| A3 | Ordering an item from the tuning prompt fails; the user then sees "Try again in a moment" (= server `too_fast` rate limit), so the order is sent twice or right after another order:* call. Fix the double call and make the first error visible correctly. | tuning NUI + tuning client + server |
+| A4 | The "Level X" row becomes very tall, but only when the "Try again in a moment" error text is shown in it. | tuning NUI |
+| A5 | Engine swap gets cancelled when the mechanic fetches the hoist. Find out why (Ap1le.Progress interrupt rules, our distance check vs. where the hoist is fetched, a stale progress token, disable.move vs. tasks ...) and fix it for every sequence step that walks. | anims |
+| A6 | Props are not rotated correctly (hoist, engine block, wheels, panels, tools). Fix each prop's rotation/offset using the model's real dimensions (GetModelDimensions) and the bone axes; document each offset. | anims |
+| A7 | Remove the icons ("emojis") from the progress bar: no `icon` in Ap1le.Progress calls. | anims (+ any other caller) |
+| A8 | Free camera: horizontal drag is inverted (left/right only; vertical is fine). | tuning client |
+| A9 | Chameleon colours do not work. Find out how chameleon paints must be applied (paint type / both primary and secondary / pearlescent / mod kit; check how qbx_customs or other working resources do it) and make them work; keep the build check. | tuning client (+ server save whitelist if keys change) |
+
+## B. Features
+
+B1. Remove the parts visually while they are out (user request). Wheels: the wheel must really be gone
+from the car while it is off (research the least destructive way: e.g. `SetVehicleWheelXOffset`/
+`SetVehicleWheelWidth`/`SetVehicleWheelSize` tricks, or BreakOffVehicleWheel + full restore of
+health/deformation/dirt afterwards; pick what really works and restores perfectly; never leave
+the car damaged or repaired for free). Engine: GTA has no native to remove the engine mesh; if no
+real way exists, keep the lifted-out engine prop and open bay, and say so in the report. (anims)
+
+B2. Manual swap mode (`Config.ManualSwap.enabled`), performance parts only. The mechanic does every step
+himself: walk to the toolbox/bench and take tools (E / ox_target), take the engine hoist and push it
+to the car (the hoist prop moves with the player), press E at each bolt point marked on the car, lift
+the part with keys (W/S raise/lower while holding the hoist), put it down, then the reverse for the new
+part. Ap1le.ShowTextUI for the current instruction, Ap1le.Progress only for timed sub-steps (unbolting).
+Cancel any time. Same server begin/finish callbacks; the server uses `Config.ManualSwap.minTimeFactor`
+instead of `Config.MinTimeFactor` when manual mode is on. API: `Anim.SwapManual(vehicle, category,
+step)` returning true/false like `Anim.Swap`; tuning.lua picks it when manual mode is enabled. (anims,
+tuning client, server)
+
+B3. Car wash ("Rens bil"): global vehicle ox_target for mechanics (anywhere unless `Config.Wash.workshopOnly`),
+needs `Config.Wash.item` in the mechanic's inventory. Server `ap1le_mechanicjob:wash:begin` (netId) /
+`wash:finish` () with the usual pending/time/distance checks, removes 1 item at finish. `Anim.Wash(vehicle,
+totalMs)`: bucket + sponge around the car (verified props/anims), dirt level visibly goes down during the
+sequence (`SetVehicleDirtLevel`), ends at 0 and `WashDecalsFromVehicle`. Afterwards open
+`Billing.OpenCreate({ { label = <wash label>, price = price list 'wash' } })`. The price list includes id
+`wash` (default Config.Wash.price). Add `cleaning_kit` to install/items.lua. (server, anims, business client, docs)
+
+B4. Tuning UI:
+- Neon: the v1 way of choosing sides is back: four toggles (left, right, front, back) that can be
+  switched on/off individually, plus the colour. (tuning client payload + tuning NUI)
+- The plate in the header looks like a real GTA plate for the vehicle's current plate type (blue on
+  white, yellow on black, yellow on blue, blue on white 2/3, exempt/yankton). Prefer the game's own
+  plate textures through `https://nui-img/<txd>/<txn>` if they can be requested (research: vehshare
+  txd names, RequestStreamedTextureDict on the client first); otherwise a careful CSS recreation
+  (font, "San Andreas" script line, colours, border). The tuning client sends `vehicle.plateIndex`. (tuning NUI + client)
+- Better icons: review every group/category icon; e.g. the plate icon does not fit. Pick clearer Font
+  Awesome 6 Free solid icons. (lead's config.lua group icons are only defaults: the tuning client may
+  map ids to better icons in its payload; report the chosen map.)
+- The breadcrumb ("Lakering > Primærfarve") is clickable: each crumb jumps back to that level.
+- "Indlæs sidste": when tuning is closed without installing and the cart was not empty, the client stores
+  that cart for the vehicle (resource KVP keyed by plate, newest 20 vehicles). Next time tuning opens on that
+  vehicle, the NUI shows a "Indlæs sidste" action that restores it into the cart (with preview).
+- Presets (section C).
+
+B5. Laptop UI redesign: the user says it looks "completely wrong/AI-made". It must look like a MacBook
+but in ap1le_core's design language: ap1le_core's dark glass, colours, radii, typography and calm
+restraint (see ap1le_core html/css/*.css and its menu/dialog look). Fewer colours: no rainbow app icons,
+no gradient wallpaper blobs, no emoji-like glyphs; one brand accent; quiet monochrome icons; realistic
+macOS structure (menu bar, dock, windows, sidebars) rendered in ap1le_core style. Use the design skills
+(see D). (laptop NUI)
+
+B6. Tuning UI closer to ap1le_core's menu look (calmer: fewer badges/pills/colours, clear hierarchy,
+the same list rows as ap1le_core menu.css). (tuning NUI)
+
+## C. Presets
+
+Storage (server, new table `ap1le_mechanicjob_presets`: id, owner identifier, owner name, name, model
+hash, data JSON, created_at; and `ap1le_mechanicjob_workorders`: plate PK, model, data JSON, owner
+identifier, owner name, created_at, expires_at).
+Preset data = `{ cosmetic = { <ox_lib prop key> = value ... }, performance = { [category] = level } }`
+(only keys from the tuning save whitelist / Config.Performance; validated on save like tuning:save).
+Built-in presets from `Config.Presets.builtin`: `performance = 'max'` = every Config.Performance
+category at its highest level, no cosmetics; works on every model.
+
+Server callbacks:
+- `preset:list` (model) -> `{ builtin = {...}, mine = { { id, name, created_at } } }` for this model (+ builtin).
+- `preset:save` (model, name, data) -> mechanic or terminal user; name 1..maxNameLength, sanitised;
+  max `maxPerPlayer` per owner; returns `{ id }`.
+- `preset:delete` (id) -> own presets only.
+- `preset:get` (id) -> own preset data (or builtin by id string).
+- `workorder:save` (netId, data) -> any player at a workshop terminal (server checks distance to a
+  `terminal` coords <= 3 m and vehicle within MaxVehicleDistance), the player must own the vehicle
+  (owned_vehicles.owner) ; upsert by plate; expires after workOrderHours.
+- `workorder:get` (netId) -> mechanic in a workshop; returns the vehicle's work order or nil.
+- `workorder:clear` (netId) -> mechanic; after it has been installed.
+
+Client:
+- Mechanic tuning: a "Presets" entry in the tuning UI: apply builtin/own preset to the cart (cosmetic
+  values that exist on this vehicle are previewed; performance levels become pending swaps listed in
+  the cart, executed one by one with the normal swap flow after cosmetic install, each needing stock),
+  "Gem som preset" (name via Ap1le.InputDialog), delete own. If the vehicle has a work order: a banner
+  "Kundens ønske" with Indlæs.
+- Customer terminal (`terminal` coords per workshop, ox_target for everyone, a small kiosk prop if
+  available, e.g. verified `prop_atm_01`-style or a screen prop): the player must sit in / stand next to
+  their own vehicle within MaxVehicleDistance; opens the same tuning NUI in **design mode**
+  (`openTuning` data gets `mode = 'design'`): preview only, no install, no swap, no order, no prices
+  total needed (show prices as estimate), performance shown as wish levels; the main action is
+  "Send til mekaniker" -> `workorder:save`; also "Gem som preset" for the customer. Closing reverts
+  the preview. (tuning client + tuning NUI + business client for the terminal target + server)
+
+## D. Design/UX skills (user asked for them)
+
+NUI devs must use the Skill tool with: `design:design-critique` (critique your before-screenshots
+first, list what looks AI-made, then fix it), `design:ux-copy` (all visible strings in Danish: short,
+plain, consistent verbs; no filler), and `anthropic-skills:de-ai` if it helps for copy. Take
+before/after screenshots.
+
+## E. New files
+
+- client/presets.lua (tuning client dev): preset + work order client logic used by tuning.lua and the terminal.
+- server/presets.lua (server dev). server/wash.lua (server dev).
+- client/wash.lua (business client dev): target + flow.
+The lead adds them to fxmanifest.lua (already done when you read this).

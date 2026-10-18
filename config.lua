@@ -25,6 +25,7 @@ Config.Workshops = {
         stash = { coords = vec3(-199.90, -1318.40, 31.09), label = "Benny's lager", slots = 80, weight = 2000000 },
         computer = { coords = vec4(-196.85, -1317.30, 31.95, 90.0), spawnProp = true },
         delivery = vec4(-189.20, -1290.60, 31.30, 0.0),
+        terminal = vec4(-208.40, -1325.20, 31.30, 180.0), -- customer design terminal (kiosk)
     },
     {
         id = 'lsc_burton',
@@ -35,6 +36,7 @@ Config.Workshops = {
         stash = { coords = vec3(-345.55, -130.20, 39.01), label = 'LSC lager', slots = 80, weight = 2000000 },
         computer = { coords = vec4(-347.10, -133.20, 39.90, 250.0), spawnProp = true },
         delivery = vec4(-356.40, -114.30, 38.70, 70.0),
+        terminal = vec4(-339.80, -140.60, 39.01, 90.0),   -- customer design terminal (kiosk)
     },
 }
 
@@ -88,6 +90,37 @@ Config.Performance = {
     },
 }
 
+-- Manual swaps (performance parts only, never cosmetics).
+-- false = the swap plays the automatic animation sequence (default).
+-- true  = the mechanic performs every step himself: fetch the tools, push the engine hoist to the
+--         car, unbolt each point, lift the part out with the keys, set it down, and back again.
+--         The server still enforces Config.ManualSwap.minTimeFactor of the normal sequence time.
+Config.ManualSwap = {
+    enabled = false,
+    minTimeFactor = 0.5,
+}
+
+-- Car wash ("Rens bil"): mechanic only, uses one cleaning kit from the mechanic's own inventory.
+-- Price id 'wash' is in the chef's price list and is added to the invoice.
+Config.Wash = {
+    item = 'cleaning_kit',
+    time = 15000,
+    price = 250,
+    workshopOnly = false,
+}
+
+-- Presets. Cosmetic mod indices differ per vehicle model, so a preset is saved for one model.
+-- Built-in presets work on every model. Customer designs from the terminal are attached to the
+-- vehicle (plate) as a work order that the mechanic can load in the tuning menu.
+Config.Presets = {
+    maxPerPlayer = 30,
+    maxNameLength = 32,
+    workOrderHours = 72,          -- customer work orders expire after this many hours
+    builtin = {
+        { id = 'max_performance', label = 'Maks performance', performance = 'max' },
+    },
+}
+
 -- Parts shop (ordered from the computer or from the tuning menu). Paid by the society account.
 -- price = purchase price per unit. Orders arrive as a crate at the workshop's delivery point after
 -- deliveryMinutes; a mechanic unpacks the crate into the workshop stash.
@@ -107,7 +140,7 @@ Config.Shop = {
     },
     crateModel = `prop_box_wood05a`,
     items = {
-        repair_kit = 400, engine_repair_kit = 900, body_repair_kit = 900, tyre = 250,
+        repair_kit = 400, engine_repair_kit = 900, body_repair_kit = 900, tyre = 250, cleaning_kit = 150,
         engine_lvl1 = 6000, engine_lvl2 = 11000, engine_lvl3 = 18000, engine_lvl4 = 27000,
         brakes_lvl1 = 3000, brakes_lvl2 = 6000, brakes_lvl3 = 10000,
         transmission_lvl1 = 5000, transmission_lvl2 = 9000, transmission_lvl3 = 14000,
@@ -205,7 +238,7 @@ Config.Cosmetic = {
 
 -- Invoices (built-in)
 Config.Invoice = {
-    society = 'society_mechanic', -- esx_addonaccount shared account
+    society = 'society_mechanic', -- esx_addonaccount shared account (registered with esx_society as Config.Job)
     societyShare = 0.7,           -- 70% to society, 30% to the mechanic who sent it
     account = 'bank',             -- customer pays from this account
     maxLines = 10,
