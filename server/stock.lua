@@ -10,11 +10,12 @@ local UNPACK_BEGIN_DISTANCE = 3.0   -- player <-> crate to start unpacking
 local UNPACK_FINISH_DISTANCE = 4.0  -- small slack: Anim.Unpack moves the ped around the crate
 local LIST_ROWS = 25
 local MAX_ITEM_NAME = 64
+local ORDER_ATTEMPT_MS = 750        -- min time between two order:place calls (any outcome)
+local ORDER_COOLDOWN_MS = 3000      -- min time between two placed orders
 
--- Order limits for mechanics below Config.BossGrade; chefs keep the full Config.Shop limits.
--- Enough for the tuning menu's "Bestil" (one part) and small restocks, so a new recruit cannot spend
--- the society account on parts. Bigger orders are the chef's call.
--- Limits for mechanics below Config.BossGrade (see Config.Shop.staffLimits); chefs use the full shop limits
+-- Order limits for mechanics below Config.BossGrade (see Config.Shop.staffLimits); chefs keep the full
+-- Config.Shop limits. Enough for the tuning menu's "Bestil" (one part) and small restocks, so a new
+-- recruit cannot spend the society account on parts. Bigger orders are the chef's call.
 local staffLimits = Config.Shop.staffLimits or {}
 local STAFF_MAX_LINES = staffLimits.maxLines or 1
 local STAFF_MAX_PER_LINE = staffLimits.maxPerLine or 2
@@ -406,7 +407,12 @@ end
 lib.callback.register('ap1le_mechanicjob:order:place', function(source, lines)
     local xPlayer = Mechanic.GetMechanic(source)
     if not xPlayer then return false, 'not_mechanic' end
-    if not Mechanic.RateLimit(source, 'order:place', 3000) then return false, 'too_fast' end
+
+    -- v2 recorded the 3 s order cooldown on every attempt, so the retry after a failed order (the false
+    -- society failure, see server/main.lua) always answered too_fast. Attempts now have a short
+    -- anti-spam window only; the order cooldown starts when an order was actually placed.
+    if not Mechanic.RateLimit(source, 'order:place:attempt', ORDER_ATTEMPT_MS) then return false, 'too_fast' end
+    if not Mechanic.RateLimitCheck(source, 'order:place', ORDER_COOLDOWN_MS) then return false, 'too_fast' end
 
     local workshop = Mechanic.ContextWorkshop(source)
     if not workshop then return false, 'not_in_workshop' end
@@ -447,6 +453,7 @@ lib.callback.register('ap1le_mechanicjob:order:place', function(source, lines)
         return false, 'error'
     end
 
+    if success then Mechanic.RateLimitMark(source, 'order:place') end
     return success, data
 end)
 

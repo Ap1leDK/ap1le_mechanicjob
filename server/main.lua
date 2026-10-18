@@ -4,7 +4,7 @@
 
 Mechanic = Mechanic or {}
 
--- One pending action (repair, swap or unpack) per player: { kind, startedAt, minMs, expiresAt, ... }
+-- One pending action (repair, swap, unpack or wash) per player: { kind, startedAt, minMs, expiresAt, ... }
 Mechanic.Pending = {}
 
 -- Per-player, per-key timestamps for Mechanic.RateLimit
@@ -96,6 +96,48 @@ function Mechanic.RateLimit(source, key, ms)
 
     list[key] = now
     return true
+end
+
+---Rate-limit check that does not record the call (pair with Mechanic.RateLimitMark after a success),
+---so a failed attempt is never punished with a cooldown.
+---@param source number
+---@param key string
+---@param ms number
+---@return boolean allowed
+function Mechanic.RateLimitCheck(source, key, ms)
+    local list = rateLimits[source]
+    local last = list and list[key]
+    return not (last and GetGameTimer() - last < ms)
+end
+
+---Record a successful call for Mechanic.RateLimitCheck.
+---@param source number
+---@param key string
+function Mechanic.RateLimitMark(source, key)
+    local list = rateLimits[source]
+    if not list then
+        list = {}
+        rateLimits[source] = list
+    end
+    list[key] = GetGameTimer()
+end
+
+---Clean a short user-provided text (preset names, labels): control characters become spaces,
+---markup characters are removed, whitespace is collapsed and trimmed.
+---Returns nil if the result is empty or longer than maxLen UTF-8 characters.
+---@param text any
+---@param maxLen integer
+---@return string|nil
+function Mechanic.SanitiseText(text, maxLen)
+    if type(text) ~= 'string' or #text > maxLen * 4 then return nil end
+
+    text = text:gsub('%c', ' '):gsub('[<>"\'`\\]', ''):gsub('%s%s+', ' ')
+    text = Mechanic.Trim(text)
+
+    local len = text and utf8.len(text)
+    if not len or len < 1 or len > maxLen then return nil end
+
+    return text
 end
 
 ---Returns the xPlayer if the player exists and has the mechanic job.
@@ -205,6 +247,27 @@ function Mechanic.ComputerWorkshop(source)
     return nil
 end
 
+-- Max distance (m) between a player and a workshop's customer terminal (server-checked)
+local TERMINAL_DISTANCE = 3.0
+
+---Workshop whose customer terminal is within TERMINAL_DISTANCE of the player, or nil.
+---Anyone may use a terminal (no job check here).
+---@param source number
+---@return table|nil
+function Mechanic.TerminalWorkshop(source)
+    local coords = workshopCoords(source)
+    if not coords then return nil end
+
+    for i = 1, #Config.Workshops do
+        local ws = Config.Workshops[i]
+        if ws.terminal and #(coords - Mechanic.ToVec3(ws.terminal)) <= TERMINAL_DISTANCE then
+            return ws
+        end
+    end
+
+    return nil
+end
+
 ---Workshop context for calls that work both in a workshop and at its computer
 ---(stock, orders): the computer's workshop first, then the workshop sphere.
 ---@param source number
@@ -284,6 +347,19 @@ function Mechanic.FetchOwned(plate)
     return { plate = row.plate, owner = row.owner, props = props }
 end
 
+---True if the entity's model matches the model stored in the owned_vehicles props
+---(true as well when no model is stored).
+---@param vehicle number entity
+---@param owned table row from Mechanic.FetchOwned
+---@return boolean
+function Mechanic.ModelMatches(vehicle, owned)
+    local storedModel = tonumber(owned.props and owned.props.model)
+    if not storedModel then return true end
+    storedModel = math.tointeger(math.floor(storedModel))
+    -- Mask both sides: one may be a signed and the other an unsigned 32-bit hash
+    return storedModel ~= nil and (GetEntityModel(vehicle) & 0xFFFFFFFF) == (storedModel & 0xFFFFFFFF)
+end
+
 ---The entity's plate is set by the client that owns it, so a matching plate alone does not prove
 ---this is the stored car. Checks that the entity model matches the stored model (when stored) and
 ---that the stored owner is the mechanic, or is online and close to the vehicle.
@@ -294,14 +370,9 @@ end
 ---@return boolean ok
 ---@return string|nil err
 function Mechanic.CheckOwnedVehicle(source, vehicle, owned)
-    local storedModel = tonumber(owned.props and owned.props.model)
-    if storedModel then
-        storedModel = math.tointeger(math.floor(storedModel))
-        -- Mask both sides: one may be a signed and the other an unsigned 32-bit hash
-        if not storedModel or (GetEntityModel(vehicle) & 0xFFFFFFFF) ~= (storedModel & 0xFFFFFFFF) then
-            Mechanic.Flag(source, ('vehicle model does not match the stored model for plate "%s"'):format(tostring(owned.plate)))
-            return false, 'not_owned'
-        end
+    if not Mechanic.ModelMatches(vehicle, owned) then
+        Mechanic.Flag(source, ('vehicle model does not match the stored model for plate "%s"'):format(tostring(owned.plate)))
+        return false, 'not_owned'
     end
 
     local owner = owned.owner
@@ -504,11 +575,30 @@ function Mechanic.PlayerName(xPlayer)
 end
 
 -- ---------------------------------------------------------------------------------------------
--- Society account (esx_addonaccount). Every move checks the balance first and verifies the result,
--- so a failed or ignored call can never lose or create money.
+-- Society account: the standard ESX pattern (esx_addonaccount:getSharedAccount, check
+-- account.money >= amount, then removeMoney/addMoney), and the society registered with esx_society.
+--
+-- v2 bug (A1/A3): TriggerEvent msgpack-serialises its arguments, so the account table handed to our
+-- callback is a COPY: account.money is a snapshot and never changes when esx_addonaccount's
+-- removeMoney/addMoney (function references into the real object) run. v2 compared account.money
+-- with the expected new balance after the call, which always failed: deposits were refunded after
+-- the money had already reached the society, and orders failed after the society had already paid.
+-- The result of the call itself is the only thing checked now (false = rejected by esx_addonaccount;
+-- older versions return nothing, which counts as success, exactly like esx_society/esx_billing do).
 -- ---------------------------------------------------------------------------------------------
 
----The society shared account object, or nil.
+-- > 0 while this resource itself moves society money, so the esx_addonaccount:addMoney/removeMoney
+-- events that esx_addonaccount fires synchronously from inside the call are not mistaken for a
+-- chef's esx_society deposit/withdraw (see server/computer.lua)
+local internalMoves = 0
+
+---True while this resource is moving society money itself.
+---@return boolean
+function Mechanic.SocietyInternalMove()
+    return internalMoves > 0
+end
+
+---The society shared account object (a copy with function references), or nil.
 ---@return table|nil
 function Mechanic.GetSociety()
     local account
@@ -526,6 +616,20 @@ function Mechanic.SocietyBalance()
     return account and account.money
 end
 
+---Call removeMoney/addMoney on the account. Only the call's own result is checked (see above).
+---@return boolean
+local function societyCall(account, fn, amount)
+    internalMoves = internalMoves + 1
+    local ok, result = pcall(account[fn], amount)
+    internalMoves = internalMoves - 1
+
+    if not ok or result == false then
+        print(('[ap1le_mechanicjob] %s(%d) on society "%s" failed (%s)'):format(fn, amount, Config.Invoice.society, tostring(result)))
+        return false
+    end
+    return true
+end
+
 ---Remove money from the society. Returns true on success, or false + locale key.
 ---@param amount integer > 0
 ---@return boolean ok
@@ -535,18 +639,13 @@ function Mechanic.SocietyRemove(amount)
 
     local account = Mechanic.GetSociety()
     if not account then
-        print(('[ap1le_mechanicjob] society account "%s" not found'):format(Config.Invoice.society))
+        print(('[ap1le_mechanicjob] society account "%s" not found (run sql/install.sql, then restart esx_addonaccount and esx_society)')
+            :format(Config.Invoice.society))
         return false, 'error'
     end
 
-    local before = account.money
-    if before < amount then return false, 'order_no_money' end
-
-    local ok, result = pcall(account.removeMoney, amount)
-    if not ok or result == false or account.money ~= before - amount then
-        print(('[ap1le_mechanicjob] removing %d from society "%s" failed (%s)'):format(amount, Config.Invoice.society, tostring(result)))
-        return false, 'error'
-    end
+    if account.money < amount then return false, 'order_no_money' end
+    if not societyCall(account, 'removeMoney', amount) then return false, 'error' end
 
     return true
 end
@@ -559,19 +658,44 @@ function Mechanic.SocietyAdd(amount)
 
     local account = Mechanic.GetSociety()
     if not account then
-        print(('[ap1le_mechanicjob] society account "%s" not found'):format(Config.Invoice.society))
+        print(('[ap1le_mechanicjob] society account "%s" not found (run sql/install.sql, then restart esx_addonaccount and esx_society)')
+            :format(Config.Invoice.society))
         return false
     end
 
-    local before = account.money
-    local ok, result = pcall(account.addMoney, amount)
-    if not ok or result == false or account.money ~= before + amount then
-        print(('[ap1le_mechanicjob] adding %d to society "%s" failed (%s)'):format(amount, Config.Invoice.society, tostring(result)))
-        return false
-    end
-
-    return true
+    return societyCall(account, 'addMoney', amount)
 end
+
+---Register Config.Job as a society with esx_society (the standard ESX job setup, as esx_mechanicjob
+---does), so the chef can use esx_society's deposit/withdraw/balance. Skipped when another resource
+---(e.g. esx_mechanicjob) already registered it.
+local function registerSociety()
+    local existing
+    TriggerEvent('esx_society:getSociety', Config.Job, function(society) existing = society end)
+    if existing then return end
+
+    local label = Config.Job
+    local ok, jobs = pcall(ESX.GetJobs)
+    if ok and type(jobs) == 'table' and type(jobs[Config.Job]) == 'table' and type(jobs[Config.Job].label) == 'string' then
+        label = jobs[Config.Job].label
+    end
+
+    -- registerSociety(name, label, account, datastore, inventory, data)
+    local society = Config.Invoice.society
+    TriggerEvent('esx_society:registerSociety', Config.Job, label, society, society, society, { type = 'private' })
+end
+
+-- Exposed for the mocked tests
+Mechanic.RegisterSociety = registerSociety
+
+registerSociety()
+
+-- esx_society forgets registered societies when it restarts
+AddEventHandler('onResourceStart', function(resource)
+    if resource == 'esx_society' then
+        SetTimeout(1000, registerSociety)
+    end
+end)
 
 ---Move money on a player's ESX account and verify the new balance.
 ---@param xPlayer table
@@ -636,11 +760,16 @@ end
 
 ---Store a pending action for the player.
 ---@param source number
----@param data table must contain kind and minMs; expectedMs is used for the abandon timeout
+---@param data table must contain kind and minMs; expectedMs is used for the abandon timeout,
+---or timeoutMs (ms from now) when the action has no predictable length (manual swaps)
 function Mechanic.SetPending(source, data)
     local now = GetGameTimer()
     data.startedAt = now
-    data.expiresAt = now + math.floor((data.expectedMs or data.minMs or 0) * 2) + PENDING_GRACE_MS
+    if data.timeoutMs then
+        data.expiresAt = now + math.floor(data.timeoutMs)
+    else
+        data.expiresAt = now + math.floor((data.expectedMs or data.minMs or 0) * 2) + PENDING_GRACE_MS
+    end
     Mechanic.Pending[source] = data
 end
 
@@ -651,7 +780,7 @@ function Mechanic.ElapsedOk(pending)
     return GetGameTimer() - pending.startedAt >= pending.minMs
 end
 
--- Shared cancel for repair, swap and unpack
+-- Shared cancel for repair, swap, unpack and wash
 lib.callback.register('ap1le_mechanicjob:cancel', function(source)
     Mechanic.Pending[source] = nil
     return true

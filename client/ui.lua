@@ -49,18 +49,25 @@ end
 
 -- UI.Progress(data) -> Ap1le.Progress(data). Blocks (call inside a thread). Returns true when the bar
 -- completed, false when it was cancelled, interrupted or another bar was already running.
--- If ap1le_core is unavailable the duration is simply waited out (the sequence still works, just
--- without a bar and without the cancel key).
+-- v3 (A7): the bar never shows an icon. `icon` is stripped here, so no caller can bring the icons
+-- back by accident. If ap1le_core is unavailable the duration is simply waited out (the sequence
+-- still works, just without a bar and without the cancel key).
 function UI.Progress(data)
+    local bar = {}
+    if type(data) == 'table' then
+        for k, v in pairs(data) do bar[k] = v end
+    end
+    bar.icon = nil
+
     local ap = core()
     if ap then
-        local ok, result = pcall(ap.Progress, data)
+        local ok, result = pcall(ap.Progress, bar)
         if ok then return result == true end
         coreMissing(result)
     else
         coreMissing('Ap1le is nil')
     end
-    Wait(math.max(0, math.floor(tonumber(type(data) == 'table' and data.duration) or 0)))
+    Wait(math.max(0, math.floor(tonumber(bar.duration) or 0)))
     return true
 end
 
@@ -74,6 +81,20 @@ function UI.IsProgressActive()
     if not ap then return false end
     local ok, result = pcall(ap.IsProgressActive)
     return ok and result == true
+end
+
+-- Help text box ("[E] Do something"). key is a short key label ('E', 'W/S') or nil.
+-- Calling it again with the same text and key is free (ap1le_core does not resend it).
+function UI.ShowTextUI(text, key)
+    local ap = core()
+    if not ap or text == nil or text == '' then return end
+    local ok, err = pcall(ap.ShowTextUI, tostring(text), key)
+    if not ok then coreMissing(err) end
+end
+
+function UI.HideTextUI()
+    local ap = core()
+    if ap then pcall(ap.HideTextUI) end
 end
 
 -- Blocks GTA's pause menu for a moment after an NUI released focus. A player who closed the tuning

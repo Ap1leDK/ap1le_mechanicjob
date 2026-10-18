@@ -44,9 +44,11 @@ RegisterNetEvent('esx:setJob', function(job)
     ESX.PlayerData = ESX.PlayerData or {}
     ESX.PlayerData.job = job
 
-    -- Lost the job while the tuning screen or the computer was open: close it (tuning reverts the preview)
+    -- Lost the job while the computer was open: close it. The mechanic's tuning screen closes itself
+    -- (and reverts the preview) in its own watchdog. Tuning is NOT closed here: a customer in the
+    -- design mode at a terminal is not a mechanic, and any job change of theirs (duty toggle, new job)
+    -- would otherwise throw them out of their design.
     if job and job.name ~= Config.Job then
-        if Tuning and Tuning.Close then Tuning.Close(true) end
         if Computer and Computer.Close then Computer.Close() end
     end
 end)
@@ -206,7 +208,10 @@ end
 -- ox_inventory item check with a short cache: canInteract is polled while targeting
 local itemCache = {}
 
-local function hasItem(name)
+---True when the player carries at least one of the item (cached for 1 s). Shared with client/wash.lua.
+---@param name string
+---@return boolean
+function Mechanic.HasItem(name)
     local now = GetGameTimer()
     local cached = itemCache[name]
     if cached and now - cached.at < 1000 then return cached.value end
@@ -220,6 +225,8 @@ local function hasItem(name)
 
     return value
 end
+
+local hasItem = Mechanic.HasItem
 
 ---Common gate for every option: mechanic, not busy, on foot.
 local function canUse()
@@ -407,6 +414,20 @@ function Mechanic.OpenMenu()
                     end
 
                     Repair.Start(vehicle, 'field')
+                end,
+            },
+            {
+                title = locale('menu_wash'),
+                icon = 'soap',
+                onSelect = function()
+                    local vehicle = Mechanic.GetTargetVehicle()
+
+                    if not vehicle then
+                        Ap1le.Notify(locale('too_far'), 'error')
+                        return
+                    end
+
+                    Wash.Start(vehicle)
                 end,
             },
             {

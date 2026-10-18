@@ -1,9 +1,12 @@
 -- ap1le_mechanicjob: every GTA V vehicle paint index (primary, secondary, pearlescent, wheel,
 -- interior and dashboard colours all use the same palette), grouped like the mod shop.
 --
--- Colours = { groups = { { id, label, minBuild?, colours = { { index, label, hex } } } } }
+-- Colours = { groups = { { id, label, minBuild?, bodyOnly?, txd?, colours = { { index, label, hex } } } } }
 --   index = value for SetVehicleColours / SetVehicleExtraColours / SetVehicleInteriorColor ...
 --   label = Danish name, hex = approximate on-screen colour for the NUI swatch (not used in game).
+--   minBuild = lowest game build that has the indices; bodyOnly = only for body paint (primary,
+--   secondary, pearlescent), never for wheels/interior/dashboard; txd = texture dictionary the
+--   group needs at runtime (the client checks that it can be loaded, see Colours.GroupsForBuild).
 --
 -- Sources:
 --  * Indices 0-160 and grouping: the game's own mod shop lists as used by vMenu
@@ -14,9 +17,25 @@
 --    (fivem-docs static/vehicle-colors/<index>.webp), a few metals tuned by hand.
 --  * Chameleon 161-222: names from Qbox qbx_customs (config/client.lua, "Chameleon"), translated;
 --    hex is only a rough main tone (these paints change colour with the viewing angle).
---    They need game build 2944 or newer (sv_enforceGameBuild); on older builds the client leaves the
---    group out (minBuild). qbx_customs also lists 223-242 ("Fubuki-jo Specials"); those could not be
---    confirmed as vanilla game colours (they show up in a paint add-on mod), so they are left out.
+--    qbx_customs also lists 223-242 ("Fubuki-jo Specials"); those come from its own streamed
+--    carcols_gen9.meta / carmodcols_gen9.meta (data_file CARCOLS_GEN9_FILE), not from the game,
+--    so they are left out.
+--
+-- Chameleon paints (v3 bug A9, "chameleon colours do not work"):
+--  * The legacy PC game that FiveM runs has the colour ENTRIES 161-222 (the gen9 carcols data is in
+--    the game files since build 2612; this resource keeps requiring 2944 as before), but not the
+--    paint ramp textures the chameleon shader samples. Those only ship with the gen9 consoles and
+--    GTA V Enhanced. Without them the indices render as a flat black/white paint, which is what was
+--    seen in game. Working resources stream the textures themselves: qbx_customs ships
+--    stream/vehicle_paint_ramps.ytd (its history even has a commit that restores the file after it
+--    was removed), and the cfx.re how-to for chameleon paints says the same.
+--  * The paint itself is applied exactly like any other index (SetVehicleColours for primary and
+--    secondary, SetVehicleExtraColours for pearlescent), as qbx_customs does; chameleon is a body
+--    paint only (qbx_customs offers it for primary, secondary and pearlescent, not for wheels).
+--  * So the client only offers this group when the texture dictionary `txd` can be loaded
+--    (RequestStreamedTextureDict + HasStreamedTextureDictLoaded), and only for body paint slots.
+--    To enable chameleon paints on a legacy server, stream a vehicle_paint_ramps.ytd (for example
+--    the one from qbx_customs, GPL-3.0, or one extracted from the game's gen9 files) in any resource.
 --  * Unused: index 255 is not a colour (xenon "default" uses it, see client/tuning.lua).
 
 Colours = {}
@@ -193,7 +212,7 @@ Colours.groups = {
         { index = 156, label = 'Standard alufælg', hex = '#484F55' },
         { index = 157, label = 'Epsilon-blå', hex = '#6C93AF' },
     } },
-    { id = 'chameleon', label = 'Kamæleon', minBuild = 2944, colours = {
+    { id = 'chameleon', label = 'Kamæleon', minBuild = 2944, bodyOnly = true, txd = 'vehicle_paint_ramps', colours = {
         { index = 161, label = 'Anodiseret rød', hex = '#9E1B22' },
         { index = 162, label = 'Anodiseret vin', hex = '#6A1530' },
         { index = 163, label = 'Anodiseret lilla', hex = '#5B2A86' },
@@ -293,16 +312,49 @@ end
 
 ---Groups usable on the given game build (chameleon needs 2944+). Returns the shared tables, do not modify.
 ---@param build? integer GetGameBuildNumber() on the client; nil = every group
+---@param opts? { body?: boolean, txdOk?: fun(txd: string): boolean } body = the list is for a body
+---       paint slot (primary, secondary, pearlescent); without it bodyOnly groups are left out.
+---       txdOk = returns whether a group's texture dictionary is available (groups with a txd are
+---       left out without it). Without opts every group of the build is returned (v2 behaviour).
 ---@return table[]
-function Colours.GroupsForBuild(build)
-    if not build then return Colours.groups end
-
+function Colours.GroupsForBuild(build, opts)
     local list = {}
     for g = 1, #Colours.groups do
         local group = Colours.groups[g]
-        if not group.minBuild or build >= group.minBuild then
-            list[#list + 1] = group
+        local ok = not build or not group.minBuild or build >= group.minBuild
+
+        if ok and opts then
+            if group.bodyOnly and not opts.body then ok = false end
+            if ok and group.txd and not (opts.txdOk and opts.txdOk(group.txd)) then ok = false end
         end
+
+        if ok then list[#list + 1] = group end
     end
     return list
+end
+
+---True if the paint index belongs to a body-only group (chameleon).
+---@param index integer
+---@return boolean
+function Colours.IsBodyOnly(index)
+    local colour = Colours.byIndex[index]
+    if not colour then return false end
+    for g = 1, #Colours.groups do
+        local group = Colours.groups[g]
+        if group.id == colour.group then return group.bodyOnly == true end
+    end
+    return false
+end
+
+---Texture dictionary the paint index needs, or nil.
+---@param index integer
+---@return string|nil
+function Colours.RequiredTxd(index)
+    local colour = Colours.byIndex[index]
+    if not colour then return nil end
+    for g = 1, #Colours.groups do
+        local group = Colours.groups[g]
+        if group.id == colour.group then return group.txd end
+    end
+    return nil
 end

@@ -89,6 +89,38 @@ for _, cfg in pairs(Config.Performance) do
     validators[cfg.propKey] = nil
 end
 
+---Validate one cosmetic value with the tuning save whitelist (also used by presets and work orders).
+---Returns the clean copy, or nil if the key is not a whitelisted cosmetic key or the value is malformed.
+---@param key any ox_lib vehicle property key
+---@param value any
+---@return any|nil
+function Mechanic.CleanCosmetic(key, value)
+    local validate = type(key) == 'string' and validators[key]
+    if not validate or value == nil then return nil end
+    return validate(value)
+end
+
+---Number of whitelisted cosmetic keys (upper bound for the size of a cosmetic table).
+---@return integer
+function Mechanic.CosmeticKeyCount()
+    local n = 0
+    for _ in pairs(validators) do n = n + 1 end
+    return n
+end
+
+---{ [category] = level } from stored owned_vehicles props.
+---@param owned table|nil row from Mechanic.FetchOwned
+---@return table
+function Mechanic.PerformanceLevels(owned)
+    local levels = {}
+    if owned then
+        for category, cfg in pairs(Config.Performance) do
+            levels[category] = (Mechanic.LevelFromProps(cfg, owned.props))
+        end
+    end
+    return levels
+end
+
 ---Shared checks for both callbacks. Returns vehicle entity + trimmed plate, or nil + error key.
 local function checkAccess(source, netId, action)
     if not Mechanic.GetMechanic(source) then return nil, 'not_mechanic' end
@@ -151,16 +183,9 @@ lib.callback.register('ap1le_mechanicjob:tuning:canOpen', function(source, netId
     local workshop = Mechanic.PlayerWorkshop(source)
     if not workshop then return false, 'not_in_workshop' end
 
-    local levels = {}
     local owned = plate and Mechanic.FetchOwned(plate)
-
     if owned == false then return false, 'error' end
-
-    if owned then
-        for category, cfg in pairs(Config.Performance) do
-            levels[category] = (Mechanic.LevelFromProps(cfg, owned.props))
-        end
-    end
+    local levels = Mechanic.PerformanceLevels(owned)
 
     -- The DB query yielded: the player must still be in that workshop
     if Mechanic.PlayerWorkshop(source) ~= workshop then return false, 'not_in_workshop' end

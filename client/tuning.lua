@@ -4,14 +4,36 @@
 --    client-built sub-categories (wheel types, tyre smoke, neon, interior colours).
 --  * Cosmetic install: one native animation per distinct anim type, apply, save, then invoice.
 --  * Performance swap: the old part is physically taken OUT, then the new part is put IN. Parts come
---    from the workshop stash (server-checked); missing parts can be ordered from the menu.
+--    from the workshop stash (server-checked); missing parts can be ordered from the menu. With
+--    Config.ManualSwap.enabled the mechanic does every step himself (Anim.SwapManual).
+--  * v3: presets, customer work orders, "Indlæs sidste" (client/presets.lua) and the customer
+--    design mode at a workshop terminal (Tuning.OpenDesign).
+--
+-- NUI protocol additions in v3 (on top of contract section 6):
+--   openTuning data: mode = 'mechanic'|'design', vehicle.plateIndex, vehicle.plateStyle =
+--     { text, outline, image? }, lastCart = { count, at }|nil, workOrder = { owner, created_at,
+--     expires_at, count }|nil, manualSwap = bool. Neon = four toggles neonLeft/neonRight/neonFront/
+--     neonBack + rgb neonColor. Group and sub nodes carry `icon` (Font Awesome 6 solid name).
+--   Lua -> NUI 'tuning:suspend' { on } while an ap1le_core dialog is shown over the tuning screen.
+--   NUI -> Lua (every cb has { ok, error? }):
+--     tuning:close        { changes?, swaps? }  cart at close time (stored for "Indlæs sidste")
+--     tuning:install      { changes, swaps? }   swaps = pending performance swaps { category, level }
+--     tuning:loadLast     {}                  -> { changes, swaps }
+--     tuning:presets      {}                  -> { builtin = { {id,label} }, mine = { {id,name,created_at} } }
+--     tuning:presetApply  { id }              -> { changes, swaps, name }
+--     tuning:presetSave   { changes, swaps, name? } -> { id, name }   (no name = Ap1le.InputDialog)
+--     tuning:presetDelete { id }              -> {}
+--     tuning:workorderLoad {}                 -> { changes, swaps }        (mechanic, banner)
+--     tuning:workorderSend { changes, swaps } -> {}                       (design mode)
+--   changes = { { id, value } } (node ids of this payload); swaps returned to the NUI =
+--   { { category, level, label, levelLabel, item?, stock?, price?, current } }.
 
 Tuning = {}
 
--- Active tuning session (nil when closed). See Tuning.Open for the fields.
+-- Active tuning session (nil when closed). See openSession for the fields.
 local state = nil
 local opening = false
-local swapping = false
+local working = false   -- an install or swap sequence runs after the screen was closed
 
 -- ---------------------------------------------------------------------------
 -- Static data
@@ -22,6 +44,13 @@ local ANIM_TYPES = { body = true, under = true, interior = true, hood = true, pa
 local MAX_CHANGES = 80
 local MAX_ORBIT_PX = 400
 local MAX_ZOOM_DELTA = 3          -- wheel notches per tuning:zoom (the NUI sends at most +-3)
+
+-- Order spacing (A3). The server refuses an order:place within 750 ms of the previous attempt and
+-- within 3 s of the previous placed order ('too_fast'). The client waits these gaps out instead of
+-- running into them, and sends one order at a time.
+local ORDER_ATTEMPT_GAP_MS = 1000
+local ORDER_PLACED_GAP_MS = 3200
+local ORDER_QUEUE_WAIT_MS = 10000
 
 -- Vehicle classes without a mod shop (boats, helicopters, planes, trains)
 local NO_TUNING_CLASS = { [14] = true, [15] = true, [16] = true, [21] = true }
@@ -84,17 +113,59 @@ local PLATE_LABELS = {
     [10] = 'LS Panic', [11] = 'LS Pounders', [12] = 'Sprunk',
 }
 
--- Neon layout = bit mask of the four tubes (neon index 0 left, 1 right, 2 front, 3 back)
-local NEON_BITS = { 1, 2, 4, 8 }
-local NEON_LAYOUTS = {
-    { value = 0,  label = 'Ingen' },
-    { value = 4,  label = 'Front' },
-    { value = 8,  label = 'Bag' },
-    { value = 3,  label = 'Sider' },
-    { value = 12, label = 'Front og bag' },
-    { value = 7,  label = 'Front og sider' },
-    { value = 11, label = 'Bag og sider' },
-    { value = 15, label = 'Hele vejen rundt' },
+-- Plate look for the NUI header (B4). text/outline = the game's plate font colours per plate index
+-- (DurtyFree gta-v-data-dumps vehicleColors.json NumberPlateTypes, FontColorHex/FontOutlineColorHex,
+-- ARGB -> #RGB). txn = the plate's diffuse texture in the shared vehicle texture dictionary
+-- PLATE_TXD (carcols plate entries: plate01..plate05, yankton_plate). The NUI shows the texture via
+-- https://nui-img/<txd>/<txn> when the dictionary could be loaded, otherwise its CSS plate.
+local PLATE_TXD = 'vehshare'
+local PLATE_STYLE = {
+    [0]  = { txn = 'plate01',       text = '#0F2352', outline = '#FFFFFF' },
+    [1]  = { txn = 'plate02',       text = '#CF9E00', outline = '#FFFFFF' },
+    [2]  = { txn = 'plate03',       text = '#BD7121', outline = '#FFFFFF' },
+    [3]  = { txn = 'plate04',       text = '#0F2352', outline = '#FFFFFF' },
+    [4]  = { txn = 'plate05',       text = '#0F2352', outline = '#FFFFFF' },
+    [5]  = { txn = 'yankton_plate', text = '#000000', outline = '#2BFF05' },
+    [6]  = { text = '#FEFEFE', outline = '#BBBBBB' },
+    [7]  = { text = '#011866', outline = '#82A2BB' },
+    [8]  = { text = '#0D147E', outline = '#000000' },
+    [9]  = { text = '#000000', outline = '#000000' },
+    [10] = { text = '#FED40E', outline = '#552E7F' },
+    [11] = { text = '#F4BB2E', outline = '#000000' },
+    [12] = { text = '#FEFEFE', outline = '#39D363' },
+}
+
+-- Neon: one toggle per tube (neon index 0 left, 1 right, 2 front, 3 back), the v1 way (B4)
+local NEON_SIDES = {
+    { id = 'neonLeft',  index = 0, key = 'tuning_neon_left' },
+    { id = 'neonRight', index = 1, key = 'tuning_neon_right' },
+    { id = 'neonFront', index = 2, key = 'tuning_neon_front' },
+    { id = 'neonBack',  index = 3, key = 'tuning_neon_back' },
+}
+
+-- Icons (B4). config.lua group icons are defaults only; these Font Awesome 6 Free solid names are
+-- clearer in the tuning rail (all verified in ap1le_core's bundled FA 6.7.2 all.min.css).
+local GROUP_ICONS = {
+    performance = 'gauge-high',
+    bodywork = 'car-side',
+    wheels = 'compact-disc',     -- reads as a rim
+    respray = 'spray-can',
+    interior = 'couch',          -- seats/upholstery
+    engine = 'oil-can',          -- engine bay (gears looked like "settings")
+    lights = 'lightbulb',
+    plates = 'hashtag',          -- the number, not an id card
+    other = 'sliders',
+}
+-- Sub-category icons by their (Danish) label from config.lua and the client-built subs
+local SUB_ICONS = {
+    ['Front'] = 'car',
+    ['Bagende'] = 'car-rear',
+    ['Sider'] = 'car-side',
+    ['Tag'] = 'car-on',
+    ['Instrumentbræt'] = 'gauge',
+    ['Lyd'] = 'volume-high',
+    ['Sæder'] = 'couch',
+    ['Bagagerum'] = 'box',
 }
 
 -- Horns have no GetModTextLabel; the mod shop maps the horn's sound hash to a text key
@@ -202,6 +273,13 @@ local function toRgb(v)
     return { clamp(r, 0, 255), clamp(g, 0, 255), clamp(b, 0, 255) }
 end
 
+---{ r=, g=, b= } (NUI shape) from either shape, or nil.
+local function rgbObject(v)
+    local c = toRgb(v)
+    if not c then return nil end
+    return { r = c[1], g = c[2], b = c[3] }
+end
+
 local function rgbEqual(a, b)
     a, b = toRgb(a), toRgb(b)
     if not a or not b then return false end
@@ -259,27 +337,73 @@ local function vehicleLabel(vehicle)
     return gameText(name) or name
 end
 
----Colour index allowed for this game build (chameleon paints need build 2944+).
-local function validColour(index)
-    local colour = Colours.byIndex[index]
-    if not colour then return false end
-    if colour.group == 'chameleon' and GAME_BUILD < 2944 then return false end
-    return true
+-- Texture dictionaries checked once per session of the resource: txd -> true/false
+local txdAvailable = {}
+
+---True if a streamed texture dictionary can be loaded (waits at most `timeout` ms the first time).
+---Used for the chameleon paint ramps (A9) and the plate textures (B4). Must run in a thread.
+local function loadTxd(txd, timeout)
+    local known = txdAvailable[txd]
+    if known ~= nil then
+        if known and not HasStreamedTextureDictLoaded(txd) then RequestStreamedTextureDict(txd, false) end
+        return known
+    end
+
+    RequestStreamedTextureDict(txd, false)
+    local deadline = GetGameTimer() + (timeout or 1500)
+    while not HasStreamedTextureDictLoaded(txd) and GetGameTimer() < deadline do
+        Wait(0)
+    end
+
+    local ok = HasStreamedTextureDictLoaded(txd)
+    txdAvailable[txd] = ok
+    return ok
 end
 
-local function neonMask(vehicle)
-    local mask = 0
-    for i = 0, 3 do
-        if IsVehicleNeonLightEnabled(vehicle, i) then mask = mask | NEON_BITS[i + 1] end
+local function txdOk(txd)
+    return txdAvailable[txd] == true
+end
+
+-- Chameleon paints (A9): only usable on game build 2944+ AND when the paint ramp textures exist
+-- (see shared/colours.lua for the root cause). Checked when a tuning screen opens.
+local chameleonHintShown = false
+
+local function checkChameleon()
+    local ramps
+    for i = 1, #Colours.groups do
+        if Colours.groups[i].txd then ramps = Colours.groups[i] break end
     end
-    return mask
+    if not ramps or (ramps.minBuild and GAME_BUILD < ramps.minBuild) then return end
+
+    if not loadTxd(ramps.txd, 1500) and not chameleonHintShown then
+        chameleonHintShown = true
+        print(('[ap1le_mechanicjob] chameleon paints hidden: the texture dictionary "%s" is not streamed. '
+            .. 'Legacy GTA V has no chameleon paint ramps; stream a %s.ytd to offer them (see shared/colours.lua).')
+            :format(ramps.txd, ramps.txd))
+    end
+end
+
+---Colour index allowed for this slot (chameleon: build 2944+, ramp textures, body paint only).
+local function validColour(index, body)
+    local colour = Colours.byIndex[index]
+    if not colour then return false end
+    for g = 1, #Colours.groups do
+        local group = Colours.groups[g]
+        if group.id == colour.group then
+            if group.minBuild and GAME_BUILD < group.minBuild then return false end
+            if group.bodyOnly and not body then return false end
+            if group.txd and not txdOk(group.txd) then return false end
+            return true
+        end
+    end
+    return false
 end
 
 local function neonMaskFromProps(enabled)
     local mask = 0
     if type(enabled) ~= 'table' then return 0 end
     for i = 1, 4 do
-        if enabled[i] == true or enabled[i] == 1 then mask = mask | NEON_BITS[i] end
+        if enabled[i] == true or enabled[i] == 1 then mask = mask | (1 << (i - 1)) end
     end
     return mask
 end
@@ -328,6 +452,12 @@ local function liveLevel(vehicle, cfg)
     return GetVehicleMod(vehicle, cfg.modType) + 1
 end
 
+local function levelLabel(cfg, level)
+    if level <= 0 then return locale('ui_stock') end
+    if cfg.toggle then return cfg.label end
+    return locale('ui_level', level)
+end
+
 local function itemLabel(item)
     local perf = PERF_ITEM[item]
     if perf then
@@ -344,10 +474,15 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Node registry
--- Every node the NUI can preview is registered in state.nodes[id]:
---   { id, priceId, anim, label, order, apply(vehicle, value) -> bool,
---     unchanged(value, final, original) -> bool, valueLabel(value) -> string }
+-- Every node the NUI can preview is registered in session.nodes[id] (and its id in nodeOrder):
+--   { id, priceId, anim, label, order,
+--     apply(vehicle, value, ctx) -> bool              preview / install on the vehicle
+--     unchanged(value, final, original) -> bool       would not change the car
+--     valueLabel(value) -> string                     invoice text
+--     toProps(value, props, original, ctx) -> bool    write the value as ox_lib props (presets)
+--     fromProps(props) -> value|nil                    read this node's value from ox_lib props }
 -- `order` sorts items inside one install animation (rims before custom tyres, colour before toggle).
+-- ctx / final = every value of the same cart by node id (context for dependent values).
 -- ---------------------------------------------------------------------------
 
 ---Index option labels by value for a list/mod node.
@@ -362,9 +497,11 @@ local function colourLabel(index)
 end
 
 ---Rim node: `wheelType` is switched to before the rim is fitted. modType 23 = front, 24 = rear (bikes).
-local function rimNode(cfg, wheelType, modType, labels, count)
+---@param currentType integer wheel type the vehicle had when the screen opened
+local function rimNode(cfg, wheelType, modType, labels, count, currentType)
     local id = ('%s:%d'):format(cfg.id, wheelType)
     local typeLabel = wheelTypeLabel[wheelType] or tostring(wheelType)
+    local key = modType == 24 and 'modBackWheels' or 'modFrontWheels'
 
     return {
         id = id,
@@ -388,7 +525,6 @@ local function rimNode(cfg, wheelType, modType, labels, count)
         end,
         unchanged = function(value, _, original)
             local index = toInt(value)
-            local key = modType == 24 and 'modBackWheels' or 'modFrontWheels'
             if index == -1 and original[key] == -1 then return true end
             return index == original[key] and (modType == 24 or original.wheels == wheelType)
         end,
@@ -398,6 +534,21 @@ local function rimNode(cfg, wheelType, modType, labels, count)
             if modType == 24 then return text end
             return ('%s - %s'):format(typeLabel, text)
         end,
+        toProps = function(value, props)
+            local index = toInt(value)
+            if not index or index < -1 or index >= count then return false end
+            props[key] = index
+            if modType == 23 then props.wheels = wheelType end
+            return true
+        end,
+        fromProps = function(props)
+            local index = toInt(props[key])
+            if index == nil or index < -1 or index >= count then return nil end
+            if modType == 24 then return index end
+            local wt = toInt(props.wheels) or currentType
+            if wt ~= wheelType then return nil end
+            return index
+        end,
     }
 end
 
@@ -405,8 +556,10 @@ end
 -- Payload (contract section 6) + registry
 -- ---------------------------------------------------------------------------
 
-local function buildPerformance(vehicle, data)
+---@param session table the session being opened (perf info is stored on it)
+local function buildPerformance(vehicle, data, session)
     local list = {}
+    local design = session.mode == 'design'
     local levels = data.owned and type(data.levels) == 'table' and data.levels or {}
     local stock = type(data.stock) == 'table' and data.stock or {}
 
@@ -424,23 +577,32 @@ local function buildPerformance(vehicle, data)
 
             for level = 1, available do
                 local item = cfg.levels[level]
+                local price = toInt(Config.Shop.items[item]) or 0
 
-                options[#options + 1] = {
-                    level = level,
-                    label = cfg.toggle and cfg.label or locale('ui_level', level),
-                    item = item,
-                    stock = math.max(0, toInt(stock[item]) or 0),
-                    price = toInt(Config.Shop.items[item]) or 0,
-                }
+                if design then
+                    -- Customer wish: no stock, no ordering; the part price is only an estimate
+                    options[#options + 1] = { level = level, label = levelLabel(cfg, level), price = price }
+                else
+                    options[#options + 1] = {
+                        level = level,
+                        label = levelLabel(cfg, level),
+                        item = item,
+                        stock = math.max(0, toInt(stock[item]) or 0),
+                        price = price,
+                    }
+                end
             end
 
             local current = data.owned and (toInt(levels[category]) or 0) or liveLevel(vehicle, cfg)
+            current = clamp(current, 0, available)
+
+            session.perf[category] = { available = available, current = current }
 
             list[#list + 1] = {
                 type = 'performance',
                 id = category,
                 label = cfg.label,
-                current = clamp(current, 0, available),
+                current = current,
                 options = options,
             }
         end
@@ -449,12 +611,15 @@ local function buildPerformance(vehicle, data)
     return list
 end
 
----Builds the cosmetic groups. Fills `nodes` (registry) and returns { [groupId] = { node, ... } }.
-local function buildCosmetic(vehicle, nodes)
+---Builds the cosmetic groups. Fills the session registry and returns { [groupId] = { node, ... } }.
+local function buildCosmetic(vehicle, session)
+    local nodes, nodeOrder = session.nodes, session.nodeOrder
     local model = GetEntityModel(vehicle)
     local isBike = IsThisModelABike(model)
     local class = GetVehicleClass(vehicle)
-    local colourGroups = Colours.GroupsForBuild(GAME_BUILD)
+    local opts = { txdOk = txdOk }
+    local bodyColours = Colours.GroupsForBuild(GAME_BUILD, { body = true, txdOk = txdOk })
+    local otherColours = Colours.GroupsForBuild(GAME_BUILD, opts)
     local extras = Config.Cosmetic.extras
 
     local byGroup = {}
@@ -470,14 +635,17 @@ local function buildCosmetic(vehicle, nodes)
     end
 
     ---Add a NUI node (and its registry entry) to a group, optionally inside a sub-category.
-    local function add(groupId, sub, node, entry)
+    local function add(groupId, sub, node, entry, subIcon)
         local list = groupList(groupId)
 
         if sub then
             local key = groupId .. '\0' .. sub
             local subNode = subIndex[key]
             if not subNode then
-                subNode = { type = 'sub', id = ('sub:%s:%s'):format(groupId, sub), label = sub, items = {} }
+                subNode = {
+                    type = 'sub', id = ('sub:%s:%s'):format(groupId, sub), label = sub,
+                    icon = subIcon or SUB_ICONS[sub], items = {},
+                }
                 subIndex[key] = subNode
                 list[#list + 1] = subNode
             end
@@ -485,7 +653,10 @@ local function buildCosmetic(vehicle, nodes)
         end
 
         list[#list + 1] = node
-        if entry then nodes[entry.id] = entry end
+        if entry then
+            nodes[entry.id] = entry
+            nodeOrder[#nodeOrder + 1] = entry.id
+        end
     end
 
     -- Standard mod slots -------------------------------------------------------
@@ -514,6 +685,17 @@ local function buildCosmetic(vehicle, nodes)
             end,
             unchanged = function(value, _, original) return toInt(value) == original[cfg.id] end,
             valueLabel = function(value) return labels[toInt(value)] or tostring(value) end,
+            toProps = function(value, props)
+                local index = toInt(value)
+                if not index or index < -1 or index >= count then return false end
+                props[cfg.id] = index
+                return true
+            end,
+            fromProps = function(props)
+                local index = toInt(props[cfg.id])
+                if index == nil or index < -1 or index >= count then return nil end
+                return index
+            end,
         })
     end
 
@@ -563,7 +745,7 @@ local function buildCosmetic(vehicle, nodes)
 
         for i = 1, #found do
             local f = found[i]
-            local entry = rimNode(cfg, f.wheelType, 23, optionLabels(f.options), f.count)
+            local entry = rimNode(cfg, f.wheelType, 23, optionLabels(f.options), f.count, originalType)
             local node = {
                 type = 'mod', id = entry.id, label = isBike and cfg.label or (wheelTypeLabel[f.wheelType] or cfg.label),
                 price = priceOf(cfg.id), priceId = cfg.id, wheelType = f.wheelType, options = f.options,
@@ -572,7 +754,7 @@ local function buildCosmetic(vehicle, nodes)
             }
 
             -- Cars: one sub-category "Fælge" with a list per wheel type. Bikes: the rims directly.
-            add(cfg.group, not isBike and cfg.label or nil, node, entry)
+            add(cfg.group, not isBike and cfg.label or nil, node, entry, 'compact-disc')
         end
     end
 
@@ -587,7 +769,7 @@ local function buildCosmetic(vehicle, nodes)
             options[#options + 1] = { value = index, label = modOptionLabel(vehicle, 24, index, cfg.label) }
         end
 
-        local entry = rimNode(cfg, WHEEL_TYPE_BIKE, 24, optionLabels(options), count)
+        local entry = rimNode(cfg, WHEEL_TYPE_BIKE, 24, optionLabels(options), count, WHEEL_TYPE_BIKE)
         add(cfg.group, nil, {
             type = 'mod', id = entry.id, label = cfg.label, price = priceOf(cfg.id), priceId = cfg.id,
             wheelType = WHEEL_TYPE_BIKE, current = GetVehicleMod(vehicle, 24), options = options,
@@ -608,24 +790,40 @@ local function buildCosmetic(vehicle, nodes)
 
     -- Extras -------------------------------------------------------------------
 
-    local function colourNode(id, sub, current, apply, unchanged)
+    ---@param propKey string ox_lib props key of this colour
+    ---@param body boolean body paint slot (chameleon allowed)
+    local function colourNode(id, sub, current, propKey, body, apply, unchanged, toProps)
         local cfg = extras[id]
         if not cfg then return end
 
         add(cfg.group, sub, {
             type = 'colour', id = id, label = cfg.label, price = priceOf(id), priceId = id,
-            current = current, groups = colourGroups,
+            current = current, groups = body and bodyColours or otherColours,
         }, {
             id = id, priceId = id, anim = cfg.anim, label = cfg.label, order = 1,
-            apply = function(veh, value)
+            apply = function(veh, value, ctx)
                 local index = toInt(value)
-                if not index or not validColour(index) then return false end
-                apply(veh, index)
+                if not index or not validColour(index, body) then return false end
+                apply(veh, index, ctx)
                 return true
             end,
             unchanged = function(value, _, original) return unchanged(toInt(value), original) end,
             valueLabel = function(value) return colourLabel(toInt(value)) end,
-        })
+            toProps = function(value, props, _, ctx)
+                local index = toInt(value)
+                if not index or not validColour(index, body) then return false end
+                props[propKey] = index
+                if toProps then toProps(index, props, ctx) end
+                return true
+            end,
+            fromProps = function(props)
+                local index = props[propKey]
+                if type(index) ~= 'number' then return nil end -- custom RGB paints are not a palette value
+                index = toInt(index)
+                if not index or not validColour(index, body) then return nil end
+                return index
+            end,
+        }, 'palette')
     end
 
     local builders = {}
@@ -650,6 +848,17 @@ local function buildCosmetic(vehicle, nodes)
             end,
             unchanged = function(value, _, original) return toBool(value) == (original.modCustomTiresF == true) end,
             valueLabel = function(value) return toBool(value) and locale('tuning_on') or locale('tuning_off') end,
+            toProps = function(value, props)
+                local on = toBool(value)
+                if on == nil then return false end
+                props.modCustomTiresF = on
+                if isBike then props.modCustomTiresR = on end
+                return true
+            end,
+            fromProps = function(props)
+                if type(props.modCustomTiresF) ~= 'boolean' then return nil end
+                return props.modCustomTiresF
+            end,
         })
     end
 
@@ -673,7 +882,17 @@ local function buildCosmetic(vehicle, nodes)
             end,
             unchanged = function(value, _, original) return toBool(value) == (original.modSmokeEnabled == true) end,
             valueLabel = function(value) return toBool(value) and locale('tuning_on') or locale('tuning_off') end,
-        })
+            toProps = function(value, props)
+                local on = toBool(value)
+                if on == nil then return false end
+                props.modSmokeEnabled = on
+                return true
+            end,
+            fromProps = function(props)
+                if type(props.modSmokeEnabled) ~= 'boolean' then return nil end
+                return props.modSmokeEnabled
+            end,
+        }, 'smog')
 
         add(cfg.group, cfg.label, {
             type = 'rgb', id = 'tyreSmokeColor', label = locale('tuning_smoke_colour'), price = priceOf('tyreSmoke'),
@@ -696,32 +915,58 @@ local function buildCosmetic(vehicle, nodes)
                 return original.modSmokeEnabled == true and rgbEqual(value, original.tyreSmokeColor)
             end,
             valueLabel = function(value) return rgbHex(value) end,
+            toProps = function(value, props, _, ctx)
+                local c = toRgb(value)
+                if not c then return false end
+                props.tyreSmokeColor = c
+                if not (ctx and toBool(ctx.tyreSmoke) == false) then props.modSmokeEnabled = true end
+                return true
+            end,
+            fromProps = function(props)
+                if props.modSmokeEnabled == false then return nil end
+                return rgbObject(props.tyreSmokeColor)
+            end,
         })
     end
 
     builders.wheelColor = function()
         if class == 13 then return end
         local _, wheel = GetVehicleExtraColours(vehicle)
-        colourNode('wheelColor', nil, wheel, function(veh, index)
+        colourNode('wheelColor', nil, wheel, 'wheelColor', false, function(veh, index)
             local p = GetVehicleExtraColours(veh)
             SetVehicleExtraColours(veh, p, index)
         end, function(index, original) return index == original.wheelColor end)
     end
 
+    ---Chameleon primary (A9): the mod shop's chameleon entries set the primary colour (col) and the
+    ---pearlescent (spec) together (carmodcols_gen9 <chameleon> items), so the pearl follows the paint
+    ---unless the same cart sets its own pearlescent.
+    local function chameleonPearl(veh, index, ctx)
+        if not Colours.IsBodyOnly(index) then return end
+        if ctx and ctx.pearlescent ~= nil then return end
+        local _, wheel = GetVehicleExtraColours(veh)
+        SetVehicleExtraColours(veh, index, wheel)
+    end
+
     builders.color1 = function()
         local c1 = GetVehicleColours(vehicle)
-        colourNode('color1', nil, c1, function(veh, index)
+        colourNode('color1', nil, c1, 'color1', true, function(veh, index, ctx)
             local _, c2 = GetVehicleColours(veh)
             ClearVehicleCustomPrimaryColour(veh)
             SetVehicleColours(veh, index, c2)
+            chameleonPearl(veh, index, ctx)
         end, function(index, original)
             return type(original.color1) == 'number' and index == original.color1
+        end, function(index, props, ctx)
+            if Colours.IsBodyOnly(index) and not (ctx and ctx.pearlescent ~= nil) then
+                props.pearlescentColor = index
+            end
         end)
     end
 
     builders.color2 = function()
         local _, c2 = GetVehicleColours(vehicle)
-        colourNode('color2', nil, c2, function(veh, index)
+        colourNode('color2', nil, c2, 'color2', true, function(veh, index)
             local c1 = GetVehicleColours(veh)
             ClearVehicleCustomSecondaryColour(veh)
             SetVehicleColours(veh, c1, index)
@@ -732,7 +977,7 @@ local function buildCosmetic(vehicle, nodes)
 
     builders.pearlescent = function()
         local pearl = GetVehicleExtraColours(vehicle)
-        colourNode('pearlescent', nil, pearl, function(veh, index)
+        colourNode('pearlescent', nil, pearl, 'pearlescentColor', true, function(veh, index)
             local _, w = GetVehicleExtraColours(veh)
             SetVehicleExtraColours(veh, index, w)
         end, function(index, original) return index == original.pearlescentColor end)
@@ -740,14 +985,14 @@ local function buildCosmetic(vehicle, nodes)
 
     builders.interiorColor = function()
         if isBike then return end
-        colourNode('interiorColor', locale('tuning_colours'), GetVehicleInteriorColor(vehicle), function(veh, index)
+        colourNode('interiorColor', locale('tuning_colours'), GetVehicleInteriorColor(vehicle), 'interiorColor', false, function(veh, index)
             SetVehicleInteriorColor(veh, index)
         end, function(index, original) return index == original.interiorColor end)
     end
 
     builders.dashboardColor = function()
         if isBike then return end
-        colourNode('dashboardColor', locale('tuning_colours'), GetVehicleDashboardColor(vehicle), function(veh, index)
+        colourNode('dashboardColor', locale('tuning_colours'), GetVehicleDashboardColor(vehicle), 'dashboardColor', false, function(veh, index)
             SetVehicleDashboardColor(veh, index)
         end, function(index, original) return index == original.dashboardColor end)
     end
@@ -781,46 +1026,88 @@ local function buildCosmetic(vehicle, nodes)
                 return toInt(value) == normaliseXenon(original.modXenon, original.xenonColor)
             end,
             valueLabel = function(value) return values[toInt(value)] or tostring(value) end,
+            toProps = function(value, props)
+                local v = toInt(value)
+                if not v or not values[v] then return false end
+                props.modXenon = v ~= XENON_OFF
+                if v ~= XENON_OFF then props.xenonColor = v end
+                return true
+            end,
+            fromProps = function(props)
+                if type(props.modXenon) ~= 'boolean' then return nil end
+                return normaliseXenon(props.modXenon, props.xenonColor)
+            end,
         })
     end
 
     builders.neon = function(cfg)
         if isBike or class == 13 then return end
 
-        local mask = neonMask(vehicle)
-        local options = NEON_LAYOUTS
-        local known = false
-        for i = 1, #NEON_LAYOUTS do
-            if NEON_LAYOUTS[i].value == mask then known = true break end
-        end
-        if not known then
-            -- An odd layout (e.g. one side only) stays selectable as the current one
-            options = { { value = mask, label = locale('tuning_neon_current') } }
-            for i = 1, #NEON_LAYOUTS do options[#options + 1] = NEON_LAYOUTS[i] end
-        end
-        local labels = optionLabels(options)
-
         local r, g, b = GetVehicleNeonLightsColour(vehicle)
+        local price = priceOf('neon')
+        local sideLabel = {}
 
-        add(cfg.group, cfg.label, {
-            type = 'list', id = 'neonLayout', label = locale('tuning_neon_layout'), price = priceOf('neon'), priceId = 'neon',
-            current = mask, options = options,
-        }, {
-            id = 'neonLayout', priceId = 'neon', anim = cfg.anim, label = cfg.label, order = 1,
-            apply = function(veh, value)
-                local v = toInt(value)
-                if not v or not labels[v] then return false end
-                for i = 0, 3 do
-                    SetVehicleNeonLightEnabled(veh, i, v & NEON_BITS[i + 1] ~= 0)
+        ---Neon mask (bit i = tube i) after a cart: final toggles over the original layout.
+        local function finalMask(final, original)
+            local mask = neonMaskFromProps(original.neonEnabled)
+            for i = 1, #NEON_SIDES do
+                local side = NEON_SIDES[i]
+                local on = final and toBool(final[side.id])
+                if on ~= nil then
+                    local bit = 1 << side.index
+                    if on then mask = mask | bit else mask = mask & ~bit end
                 end
-                return true
-            end,
-            unchanged = function(value, _, original) return toInt(value) == neonMaskFromProps(original.neonEnabled) end,
-            valueLabel = function(value) return labels[toInt(value)] or tostring(value) end,
-        })
+            end
+            return mask
+        end
+
+        -- Four individual tubes, switched on and off like the v1 menu (B4)
+        for i = 1, #NEON_SIDES do
+            local side = NEON_SIDES[i]
+            local label = locale(side.key)
+            sideLabel[side.id] = label
+
+            add(cfg.group, cfg.label, {
+                type = 'toggle', id = side.id, label = label, price = price, priceId = 'neon',
+                current = IsVehicleNeonLightEnabled(vehicle, side.index) == true,
+            }, {
+                id = side.id, priceId = 'neon', anim = cfg.anim, label = cfg.label, order = 1,
+                apply = function(veh, value)
+                    local on = toBool(value)
+                    if on == nil then return false end
+                    SetVehicleNeonLightEnabled(veh, side.index, on)
+                    return true
+                end,
+                unchanged = function(value, _, original)
+                    local enabled = type(original.neonEnabled) == 'table' and original.neonEnabled[side.index + 1] == true
+                    return toBool(value) == enabled
+                end,
+                valueLabel = function(value)
+                    return ('%s %s'):format(label, (toBool(value) and locale('tuning_on') or locale('tuning_off')):lower())
+                end,
+                toProps = function(value, props, original)
+                    local on = toBool(value)
+                    if on == nil then return false end
+                    local enabled = type(props.neonEnabled) == 'table' and props.neonEnabled
+                        or (type(original) == 'table' and type(original.neonEnabled) == 'table' and original.neonEnabled)
+                        or {}
+                    local copy = {}
+                    for n = 1, 4 do copy[n] = enabled[n] == true end
+                    copy[side.index + 1] = on
+                    props.neonEnabled = copy
+                    return true
+                end,
+                fromProps = function(props)
+                    if type(props.neonEnabled) ~= 'table' then return nil end
+                    local v = props.neonEnabled[side.index + 1]
+                    if type(v) ~= 'boolean' then return nil end
+                    return v
+                end,
+            }, 'bolt')
+        end
 
         add(cfg.group, cfg.label, {
-            type = 'rgb', id = 'neonColor', label = locale('tuning_neon_colour'), price = priceOf('neon'), priceId = 'neon',
+            type = 'rgb', id = 'neonColor', label = locale('tuning_neon_colour'), price = price, priceId = 'neon',
             current = { r = r, g = g, b = b },
         }, {
             id = 'neonColor', priceId = 'neon', anim = cfg.anim, label = cfg.label, order = 2,
@@ -831,12 +1118,18 @@ local function buildCosmetic(vehicle, nodes)
                 return true
             end,
             unchanged = function(value, final, original)
-                local layout = final.neonLayout
-                if layout == nil then layout = neonMaskFromProps(original.neonEnabled) end
-                if toInt(layout) == 0 then return true end
+                -- A colour without any tube lit changes nothing
+                if finalMask(final, original) == 0 then return true end
                 return rgbEqual(value, original.neonColor)
             end,
             valueLabel = function(value) return rgbHex(value) end,
+            toProps = function(value, props)
+                local c = toRgb(value)
+                if not c then return false end
+                props.neonColor = c
+                return true
+            end,
+            fromProps = function(props) return rgbObject(props.neonColor) end,
         })
     end
 
@@ -872,6 +1165,17 @@ local function buildCosmetic(vehicle, nodes)
             end,
             unchanged = function(value, _, original) return normaliseTint(value) == normaliseTint(original.windowTint) end,
             valueLabel = function(value) return values[toInt(value)] or tostring(value) end,
+            toProps = function(value, props)
+                local v = toInt(value)
+                if not v or not values[v] then return false end
+                props.windowTint = v
+                return true
+            end,
+            fromProps = function(props)
+                if props.windowTint == nil then return nil end
+                local v = normaliseTint(props.windowTint)
+                return values[v] and v or nil
+            end,
         })
     end
 
@@ -899,6 +1203,16 @@ local function buildCosmetic(vehicle, nodes)
             end,
             unchanged = function(value, _, original) return toInt(value) == original.plateIndex end,
             valueLabel = function(value) return values[toInt(value)] or tostring(value) end,
+            toProps = function(value, props)
+                local v = toInt(value)
+                if not v or not values[v] then return false end
+                props.plateIndex = v
+                return true
+            end,
+            fromProps = function(props)
+                local v = toInt(props.plateIndex)
+                return v and values[v] and v or nil
+            end,
         })
     end
 
@@ -926,6 +1240,16 @@ local function buildCosmetic(vehicle, nodes)
             end,
             unchanged = function(value, _, original) return toInt(value) == original.livery end,
             valueLabel = function(value) return values[toInt(value)] or tostring(value) end,
+            toProps = function(value, props)
+                local v = toInt(value)
+                if not v or not values[v] then return false end
+                props.livery = v
+                return true
+            end,
+            fromProps = function(props)
+                local v = toInt(props.livery)
+                return v and values[v] and v or nil
+            end,
         })
     end
 
@@ -940,30 +1264,247 @@ local function buildCosmetic(vehicle, nodes)
     return byGroup
 end
 
----Full openTuning payload + registry.
-local function buildPayload(vehicle, data, nodes)
-    local groups = {}
+---Plate look for the NUI header (B4). Requests the plate texture dictionary once per resource start.
+local function plateStyle(index)
+    local style = PLATE_STYLE[index] or PLATE_STYLE[0]
+    local out = { text = style.text, outline = style.outline }
 
-    local performance = buildPerformance(vehicle, data)
-    if #performance > 0 then
-        groups[1] = { id = 'performance', label = locale('ui_performance'), icon = 'gauge-high', items = performance }
+    if style.txn and loadTxd(PLATE_TXD, 1000) then
+        out.image = ('https://nui-img/%s/%s'):format(PLATE_TXD, style.txn)
     end
 
-    local byGroup = buildCosmetic(vehicle, nodes)
+    return out
+end
+
+---Full openTuning payload + registry.
+local function buildPayload(vehicle, data, session)
+    local groups = {}
+
+    local performance = buildPerformance(vehicle, data, session)
+    if #performance > 0 then
+        groups[1] = { id = 'performance', label = locale('ui_performance'), icon = GROUP_ICONS.performance, items = performance }
+    end
+
+    local byGroup = buildCosmetic(vehicle, session)
 
     for i = 1, #Config.Cosmetic.groups do
         local g = Config.Cosmetic.groups[i]
         local items = byGroup[g.id]
 
         if items and #items > 0 then
-            groups[#groups + 1] = { id = g.id, label = g.label, icon = g.icon, items = items }
+            groups[#groups + 1] = { id = g.id, label = g.label, icon = GROUP_ICONS[g.id] or g.icon, items = items }
         end
     end
 
+    local plateIndex = GetVehicleNumberPlateTextIndex(vehicle)
+
     return {
-        vehicle = { label = vehicleLabel(vehicle), plate = trim(GetVehicleNumberPlateText(vehicle)), owned = data.owned == true },
+        mode = session.mode,
+        manualSwap = session.mode == 'mechanic' and Config.ManualSwap ~= nil and Config.ManualSwap.enabled == true,
+        vehicle = {
+            label = vehicleLabel(vehicle),
+            plate = session.plate,
+            owned = session.owned,
+            plateIndex = plateIndex,
+            plateStyle = plateStyle(plateIndex),
+        },
         groups = groups,
     }
+end
+
+-- ---------------------------------------------------------------------------
+-- Cart <-> preset conversion (uses the registry of the open session)
+-- ---------------------------------------------------------------------------
+
+---Final values of a set of node values (context for dependent "unchanged" checks and applies).
+local function finalContext(values)
+    local final = {}
+    for id, value in pairs(values) do final[id] = value end
+    if final.tyreSmoke ~= nil then final.tyreSmoke = toBool(final.tyreSmoke) end
+    for i = 1, #NEON_SIDES do
+        local id = NEON_SIDES[i].id
+        if final[id] ~= nil then final[id] = toBool(final[id]) end
+    end
+    return final
+end
+
+---Validated { { id, value } } from NUI cart changes (known node ids only, last value per id,
+---rims of the front wheel slot replace each other).
+local function cleanChanges(session, changes)
+    local out, index = {}, {}
+    if type(changes) ~= 'table' then return out end
+
+    for i = 1, math.min(#changes, MAX_CHANGES) do
+        local c = changes[i]
+        local node = type(c) == 'table' and type(c.id) == 'string' and session.nodes[c.id]
+        if node and c.value ~= nil then
+            if node.rim and node.priceId == 'modFrontWheels' then
+                for n = #out, 1, -1 do
+                    local other = session.nodes[out[n].id]
+                    if other.rim and other.priceId == 'modFrontWheels' and other.id ~= node.id then
+                        table.remove(out, n)
+                    end
+                end
+                index = {}
+                for n = 1, #out do index[out[n].id] = n end
+            end
+
+            if index[node.id] then
+                out[index[node.id]].value = c.value
+            else
+                out[#out + 1] = { id = node.id, value = c.value }
+                index[node.id] = #out
+            end
+        end
+    end
+
+    return out
+end
+
+---Pending performance swaps from a { [category] = level } map or a { { category, level } } list.
+---Levels are clamped to what this vehicle supports; levels equal to the current one are dropped.
+---@return table[] swaps for the NUI
+local function buildSwaps(session, perf)
+    local wanted = {}
+
+    if type(perf) == 'table' then
+        if #perf > 0 then
+            for i = 1, #perf do
+                local s = perf[i]
+                if type(s) == 'table' and type(s.category) == 'string' then wanted[s.category] = toInt(s.level) end
+            end
+        else
+            for category, level in pairs(perf) do
+                if type(category) == 'string' then wanted[category] = toInt(level) end
+            end
+        end
+    end
+
+    local swaps = {}
+    for i = 1, #PERF_ORDER do
+        local category = PERF_ORDER[i]
+        local info = session.perf[category]
+        local level = wanted[category]
+        local cfg = Config.Performance[category]
+
+        if info and level then
+            level = clamp(level, 0, info.available)
+            if level ~= info.current then
+                local item = level > 0 and cfg.levels[level] or nil
+                local swap = {
+                    category = category,
+                    level = level,
+                    current = info.current,
+                    label = cfg.label,
+                    levelLabel = levelLabel(cfg, level),
+                }
+                if item then
+                    swap.price = toInt(Config.Shop.items[item]) or 0
+                    if session.mode == 'mechanic' then
+                        swap.item = item
+                        swap.stock = math.max(0, toInt(session.stock[item]) or 0)
+                    end
+                end
+                swaps[#swaps + 1] = swap
+            end
+        end
+    end
+
+    return swaps
+end
+
+---Preview a list of changes on the vehicle (like tuning:preview does one by one).
+---@return table[] the changes that applied
+local function previewChanges(session, changes)
+    local applied = {}
+    if not DoesEntityExist(session.vehicle) then return applied end
+
+    for i = 1, #changes do
+        local node = session.nodes[changes[i].id]
+        local ok, result = pcall(node.apply, session.vehicle, changes[i].value, session.pending)
+        if ok and result == true then
+            session.pending[node.id] = changes[i].value
+            if node.rim then session.lastRim = node.id end
+            applied[#applied + 1] = changes[i]
+        end
+    end
+
+    return applied
+end
+
+---Changes that turn the original car into the look described by ox_lib props (only nodes this
+---vehicle has, only values that differ from the original).
+local function changesFromProps(session, props)
+    if type(props) ~= 'table' then return {} end
+
+    local values, order = {}, {}
+    for i = 1, #session.nodeOrder do
+        local id = session.nodeOrder[i]
+        local node = session.nodes[id]
+        local ok, value = pcall(node.fromProps, props)
+        if ok and value ~= nil then
+            values[id] = value
+            order[#order + 1] = id
+        end
+    end
+
+    local final = finalContext(values)
+    local changes = {}
+    for i = 1, #order do
+        local id = order[i]
+        local node = session.nodes[id]
+        local ok, same = pcall(node.unchanged, values[id], final, session.original)
+        if ok and not same then changes[#changes + 1] = { id = id, value = values[id] } end
+    end
+
+    return changes
+end
+
+---ox_lib props from cart changes. full = start from the original car (a complete look, for presets);
+---otherwise only the keys the changes touch (a work order: the customer's wishes).
+local function propsFromChanges(session, changes, full)
+    local props = full and Presets.CleanProps(session.original) or {}
+    local values = {}
+    for i = 1, #changes do values[changes[i].id] = changes[i].value end
+    local ctx = finalContext(values)
+
+    -- Lower `order` first (rims before custom tyres, colours before their toggles)
+    local sorted = {}
+    for i = 1, #changes do sorted[i] = changes[i] end
+    table.sort(sorted, function(a, b)
+        return (session.nodes[a.id].order or 1) < (session.nodes[b.id].order or 1)
+    end)
+
+    for i = 1, #sorted do
+        local node = session.nodes[sorted[i].id]
+        pcall(node.toProps, sorted[i].value, props, session.original, ctx)
+    end
+
+    return Presets.CleanProps(props)
+end
+
+---{ [category] = level } for a preset: the car's current levels (> 0, owned cars only) overlaid with
+---the pending swaps of the cart.
+local function performanceFromSwaps(session, swaps, includeCurrent)
+    local perf = {}
+
+    if includeCurrent and session.owned then
+        for category, info in pairs(session.perf) do
+            if info.current > 0 then perf[category] = info.current end
+        end
+    end
+
+    if type(swaps) == 'table' then
+        for i = 1, #swaps do
+            local s = swaps[i]
+            local cfg = type(s) == 'table' and type(s.category) == 'string' and Config.Performance[s.category]
+            local info = cfg and session.perf[s.category]
+            local level = info and toInt(s.level)
+            if level then perf[s.category] = clamp(level, 0, info.available) end
+        end
+    end
+
+    return Presets.CleanPerformance(perf)
 end
 
 -- ---------------------------------------------------------------------------
@@ -1271,15 +1812,159 @@ function Tuning.Close(revert, ease)
     end
 end
 
+---Run an ap1le_core dialog over the open tuning screen. Our frame gives up NUI focus while the
+---dialog is shown (otherwise the full-screen tuning page sits on top of ap1le_core's page and takes
+---the clicks), and gets it back afterwards (ap1le_core's ResetUiFocus releases focus on close).
+---@return any result of fn
+local function withCoreDialog(session, fn)
+    SendNUIMessage({ action = 'tuning:suspend', data = { on = true } })
+    SetNuiFocus(false, false)
+
+    local ok, result = pcall(fn)
+    if not ok then print(('[ap1le_mechanicjob] tuning dialog error: %s'):format(tostring(result))) end
+
+    if state == session then
+        SetNuiFocus(true, true)
+        SendNUIMessage({ action = 'tuning:suspend', data = { on = false } })
+    end
+
+    return ok and result or nil
+end
+
 -- ---------------------------------------------------------------------------
 -- Opening
 -- ---------------------------------------------------------------------------
 
----Open the tuning screen on a vehicle (workshop only).
+---Create the session, build the payload, start camera + NUI + watchdog. Runs in a thread.
+---@param opts { vehicle: integer, netId: integer, mode: string, data: table, maxDistance: number }
+local function openSession(opts)
+    local vehicle, data = opts.vehicle, opts.data
+
+    if not DoesEntityExist(vehicle) or not Mechanic.RequestControl(vehicle) then
+        notify(locale('error'), 'error')
+        return false
+    end
+
+    checkChameleon()
+
+    local original = lib.getVehicleProperties(vehicle)
+    SetVehicleModKit(vehicle, 0)
+
+    local prices = {}
+    if type(data.prices) == 'table' then
+        for id, price in pairs(data.prices) do
+            if type(id) == 'string' and tonumber(price) then prices[id] = math.max(0, math.floor(tonumber(price))) end
+        end
+    end
+
+    local stock = {}
+    if type(data.stock) == 'table' then
+        for item, count in pairs(data.stock) do
+            if type(item) == 'string' then stock[item] = math.max(0, toInt(count) or 0) end
+        end
+    end
+
+    local session = {
+        mode = opts.mode,         -- 'mechanic' | 'design'
+        vehicle = vehicle,
+        netId = opts.netId,
+        model = GetEntityModel(vehicle),
+        plate = trim(GetVehicleNumberPlateText(vehicle)),
+        original = original,
+        owned = data.owned == true,
+        prices = prices,
+        stock = stock,
+        workshop = data.workshop,
+        nodes = {},
+        nodeOrder = {},
+        perf = {},        -- category -> { available, current }
+        pending = {},     -- node id -> last previewed value (context for dependent previews)
+        lastRim = nil,    -- id of the rim node previewed last
+        workOrder = opts.workOrder,
+        workOrderLoaded = false,
+        -- No native getter exists for the freeze state; vehicles are normally unfrozen in a workshop
+        wasFrozen = false,
+        doorsOpen = {},
+        lightsForced = false,
+        installing = false,
+        busy = false,     -- a preset / dialog call is running
+        cam = nil,
+    }
+
+    -- priceOf reads state.prices while the payload is built
+    state = session
+    local built, payload = pcall(buildPayload, vehicle, { owned = session.owned, levels = data.levels, stock = stock }, session)
+
+    if not built then
+        print(('[ap1le_mechanicjob] building the tuning menu failed: %s'):format(tostring(payload)))
+        state = nil
+        pcall(lib.setVehicleProperties, vehicle, original)
+        notify(locale('error'), 'error')
+        return false
+    end
+
+    -- "Indlæs sidste" and the customer's work order (shown as actions in the NUI)
+    local last = Presets.GetLast(session.plate, session.model)
+    if last then
+        payload.lastCart = { count = #last.changes + #(last.swaps or {}), at = last.at }
+    end
+
+    local wo = session.workOrder
+    if wo then
+        local count = 0
+        for _ in pairs(wo.data.cosmetic or {}) do count = count + 1 end
+        for _ in pairs(wo.data.performance or {}) do count = count + 1 end
+        payload.workOrder = { owner = wo.owner_name, created_at = wo.created_at, expires_at = wo.expires_at, count = count }
+    end
+
+    FreezeEntityPosition(vehicle, true)
+    startCamera(session)
+
+    SetNuiFocus(true, true)
+    SendNUIMessage({ action = 'openTuning', data = payload })
+
+    -- Light watchdog: close if the player dies, walks away, loses the job or the car disappears
+    local maxDistance = opts.maxDistance
+    CreateThread(function()
+        while state == session do
+            Wait(500)
+
+            if state ~= session then return end
+
+            if not DoesEntityExist(session.vehicle)
+                or IsEntityDead(cache.ped)
+                or (session.mode == 'mechanic' and not Mechanic.IsMechanic())
+                or #(GetEntityCoords(cache.ped) - GetEntityCoords(session.vehicle)) > maxDistance then
+                Tuning.Close(true)
+                return
+            end
+        end
+    end)
+
+    return true
+end
+
+local function canStart(vehicle)
+    if state or opening or working or Anim.IsBusy() then return false end
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return false end
+
+    if NO_TUNING_CLASS[GetVehicleClass(vehicle)] then
+        notify(locale('not_available'), 'error')
+        return false
+    end
+
+    if not NetworkGetEntityIsNetworked(vehicle) then
+        notify(locale('busy'), 'error')
+        return false
+    end
+
+    return true
+end
+
+---Open the tuning screen on a vehicle (mechanic, workshop only).
 ---@param vehicle integer
 function Tuning.Open(vehicle)
-    if state or opening or swapping or Anim.IsBusy() then return end
-    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
+    if not canStart(vehicle) then return end
 
     if not Mechanic.IsMechanic() then
         notify(locale('not_mechanic'), 'error')
@@ -1291,13 +1976,8 @@ function Tuning.Open(vehicle)
         return
     end
 
-    if IsPedInAnyVehicle(cache.ped, false) or not NetworkGetEntityIsNetworked(vehicle) then
+    if IsPedInAnyVehicle(cache.ped, false) then
         notify(locale('busy'), 'error')
-        return
-    end
-
-    if NO_TUNING_CLASS[GetVehicleClass(vehicle)] then
-        notify(locale('not_available'), 'error')
         return
     end
 
@@ -1313,84 +1993,68 @@ function Tuning.Open(vehicle)
             return
         end
 
-        if not DoesEntityExist(vehicle) or not Mechanic.RequestControl(vehicle) then
+        -- The customer's design for this car (a failure only hides the banner)
+        local woOk, workOrder = Presets.WorkOrderGet(netId)
+        if not woOk then workOrder = nil end
+
+        local done, err = pcall(openSession, {
+            vehicle = vehicle, netId = netId, mode = 'mechanic', data = data, workOrder = workOrder,
+            maxDistance = 15.0,
+        })
+        if not done then
+            print(('[ap1le_mechanicjob] opening tuning failed: %s'):format(tostring(err)))
             notify(locale('error'), 'error')
+        end
+        opening = false
+    end)
+end
+
+---The player's own vehicle for the design mode: the one they sit in, else the closest one.
+local function designVehicle()
+    if cache.vehicle and cache.vehicle ~= 0 then return cache.vehicle end
+    local vehicle = lib.getClosestVehicle(GetEntityCoords(cache.ped), Config.MaxVehicleDistance, false)
+    return vehicle
+end
+
+---Customer design mode at a workshop terminal (any player, own vehicle). Preview only: no install,
+---swap or order; the result is sent to the mechanics as a work order or saved as a preset. Closing
+---reverts the car. The server checks terminal distance, vehicle distance and ownership.
+---@param vehicle? integer the player's vehicle (default: the one they sit in or the closest one)
+function Tuning.OpenDesign(vehicle)
+    vehicle = vehicle or designVehicle()
+    if not vehicle or vehicle == 0 then
+        notify(locale('terminal_no_vehicle'), 'error')
+        return
+    end
+
+    if not canStart(vehicle) then return end
+
+    if #(GetEntityCoords(cache.ped) - GetEntityCoords(vehicle)) > Config.MaxVehicleDistance then
+        notify(locale('terminal_no_vehicle'), 'error')
+        return
+    end
+
+    opening = true
+
+    CreateThread(function()
+        local netId = NetworkGetNetworkIdFromEntity(vehicle)
+        local ok, data = Presets.TerminalOpen(netId)
+
+        if not ok or type(data) ~= 'table' then
+            notify(failText(data), 'error')
             opening = false
             return
         end
 
-        local original = lib.getVehicleProperties(vehicle)
-        SetVehicleModKit(vehicle, 0)
-
-        local prices = {}
-        if type(data.prices) == 'table' then
-            for id, price in pairs(data.prices) do
-                if type(id) == 'string' and tonumber(price) then prices[id] = math.max(0, math.floor(tonumber(price))) end
-            end
-        end
-
-        local stock = {}
-        if type(data.stock) == 'table' then
-            for item, count in pairs(data.stock) do
-                if type(item) == 'string' then stock[item] = math.max(0, toInt(count) or 0) end
-            end
-        end
-
-        local session = {
-            vehicle = vehicle,
-            netId = netId,
-            original = original,
-            owned = data.owned == true,
-            prices = prices,
-            stock = stock,
-            workshop = data.workshop,
-            nodes = {},
-            pending = {},     -- node id -> last previewed value (context for dependent previews)
-            lastRim = nil,    -- id of the rim node previewed last
-            -- No native getter exists for the freeze state; vehicles are normally unfrozen in a workshop
-            wasFrozen = false,
-            doorsOpen = {},
-            lightsForced = false,
-            installing = false,
-            ordering = false,
-            cam = nil,
-        }
-
-        -- priceOf reads state.prices while the payload is built
-        state = session
-        local built, payload = pcall(buildPayload, vehicle, { owned = session.owned, levels = data.levels, stock = stock }, session.nodes)
-        opening = false
-
-        if not built then
-            print(('[ap1le_mechanicjob] building the tuning menu failed: %s'):format(tostring(payload)))
-            state = nil
-            pcall(lib.setVehicleProperties, vehicle, original)
+        local done, err = pcall(openSession, {
+            vehicle = vehicle, netId = netId, mode = 'design', data = data,
+            maxDistance = Config.MaxVehicleDistance + 6.0,
+        })
+        if not done then
+            print(('[ap1le_mechanicjob] opening design mode failed: %s'):format(tostring(err)))
             notify(locale('error'), 'error')
-            return
         end
-
-        FreezeEntityPosition(vehicle, true)
-        startCamera(session)
-
-        SetNuiFocus(true, true)
-        SendNUIMessage({ action = 'openTuning', data = payload })
-
-        -- Light watchdog: close if the mechanic dies, walks away, loses the job or the car disappears
-        CreateThread(function()
-            while state == session do
-                Wait(500)
-
-                if state ~= session then return end
-
-                if not DoesEntityExist(session.vehicle)
-                    or IsEntityDead(cache.ped)
-                    or not Mechanic.IsMechanic()
-                    or #(GetEntityCoords(cache.ped) - GetEntityCoords(session.vehicle)) > 15.0 then
-                    Tuning.Close(true)
-                    return
-                end
-            end
-        end)
+        opening = false
     end)
 end
 
@@ -1446,8 +2110,11 @@ RegisterNUICallback('tuning:orbit', function(data, cb)
     dy = clamp(dy, -MAX_ORBIT_PX, MAX_ORBIT_PX)
 
     local t = cam.target
-    -- Drag right = the car turns right (camera moves left around it); drag down = look from higher
-    t.yaw = (t.yaw - dx * ORBIT_DEG_PER_PX) % 360.0
+    -- A8: the car follows the cursor. Seen from the camera, the car's +X side is on the screen's
+    -- left when yaw is 0, so dragging right must INCREASE yaw (camera moves to the screen's left
+    -- around the car, the car turns right). v2 subtracted dx, which turned the car the other way.
+    -- Drag down = look from higher (unchanged, reported as correct).
+    t.yaw = (t.yaw + dx * ORBIT_DEG_PER_PX) % 360.0
     t.pitch = clamp(t.pitch + dy * PITCH_DEG_PER_PX, PITCH_MIN, PITCH_MAX)
     cam.dirty = true
 
@@ -1478,7 +2145,18 @@ RegisterNUICallback('tuning:zoom', function(data, cb)
     cb({ ok = true })
 end)
 
-RegisterNUICallback('tuning:close', function(_, cb)
+RegisterNUICallback('tuning:close', function(data, cb)
+    local session = state
+
+    -- B4 "Indlæs sidste": closed without installing and the cart was not empty -> remember it
+    if session and not session.installing and type(data) == 'table' then
+        local changes = cleanChanges(session, data.changes)
+        local swaps = type(data.swaps) == 'table' and data.swaps or {}
+        if #changes > 0 or #swaps > 0 then
+            pcall(Presets.SaveLast, session.plate, session.model, changes, swaps)
+        end
+    end
+
     Tuning.Close(true)
     cb({ ok = true })
 end)
@@ -1487,29 +2165,47 @@ end)
 -- Ordering a missing part (Society pays; the crate arrives at the delivery point)
 -- ---------------------------------------------------------------------------
 
+-- A3: one order at a time, spaced so the server's attempt window and order cooldown are never hit
+local ordering = false
+local lastOrderAttempt = -ORDER_PLACED_GAP_MS
+local lastOrderPlaced = -ORDER_PLACED_GAP_MS
+
 RegisterNUICallback('tuning:order', function(data, cb)
     local item = type(data) == 'table' and data.item
 
-    if not state or state.ordering or type(item) ~= 'string' or Config.Shop.items[item] == nil then
+    if not state or state.mode ~= 'mechanic' or type(item) ~= 'string' or Config.Shop.items[item] == nil then
         cb({ ok = false, error = locale('error') })
         return
     end
 
-    local session = state
-    session.ordering = true
-
     CreateThread(function()
-        local ok, result = lib.callback.await('ap1le_mechanicjob:order:place', false, { { item = item, count = 1 } })
-        session.ordering = false
+        -- Another order from this client is still in flight: wait for it instead of failing
+        local queueDeadline = GetGameTimer() + ORDER_QUEUE_WAIT_MS
+        while ordering and GetGameTimer() < queueDeadline do Wait(50) end
+        if ordering then
+            cb({ ok = false, error = locale('busy'), code = 'busy' })
+            return
+        end
+        ordering = true
 
-        if ok and type(result) == 'table' then
+        local readyAt = math.max(lastOrderAttempt + ORDER_ATTEMPT_GAP_MS, lastOrderPlaced + ORDER_PLACED_GAP_MS)
+        while GetGameTimer() < readyAt do Wait(50) end
+
+        lastOrderAttempt = GetGameTimer()
+        local ok, result = lib.callback.await('ap1le_mechanicjob:order:place', false, { { item = item, count = 1 } })
+        ordering = false
+
+        if ok == true and type(result) == 'table' then
+            lastOrderPlaced = GetGameTimer()
             local eta = math.max(0, toInt(result.eta) or 0)
             notify(locale('order_placed', itemLabel(item), math.max(1, math.ceil(eta / 60))), 'success')
             cb({ ok = true, eta = eta })
         else
-            local text = failText(result)
+            -- The server's own reason (no money, staff limit, too many open orders ...), once
+            local code = type(result) == 'string' and result or 'error'
+            local text = failText(code)
             notify(text, 'error')
-            cb({ ok = false, error = text })
+            cb({ ok = false, error = text, code = code })
         end
     end)
 end)
@@ -1520,6 +2216,7 @@ end)
 
 ---Group the NUI changes into billing entries (one per price id). Unknown ids, invalid values and
 ---values that would not change the car (compared to the original props) are dropped.
+---@return table[] entries, table final (every value by node id, the install context)
 local function buildEntries(session, changes)
     -- Last value per node id; for rims only the type previewed last (they replace each other)
     local values, orderIds = {}, {}
@@ -1538,11 +2235,12 @@ local function buildEntries(session, changes)
 
     local keepRim = session.lastRim and values[session.lastRim] ~= nil and session.lastRim or lastRimChange
 
-    -- Final values (context for dependent "unchanged" checks, e.g. neon colour with layout "none")
-    local final = {}
-    for id, value in pairs(values) do final[id] = value end
-    if final.tyreSmoke ~= nil then final.tyreSmoke = toBool(final.tyreSmoke) end
-    if final.neonLayout ~= nil then final.neonLayout = toInt(final.neonLayout) end
+    -- Drop the rims that were replaced, then build the final context
+    for id in pairs(values) do
+        local node = session.nodes[id]
+        if node.rim and node.priceId == 'modFrontWheels' and id ~= keepRim then values[id] = nil end
+    end
+    local final = finalContext(values)
 
     local entries, byPrice = {}, {}
 
@@ -1550,9 +2248,8 @@ local function buildEntries(session, changes)
         local id = orderIds[i]
         local node = session.nodes[id]
         local value = values[id]
-        local skip = node.rim and node.priceId == 'modFrontWheels' and id ~= keepRim
 
-        if not skip and ANIM_TYPES[node.anim] and not node.unchanged(value, final, session.original) then
+        if value ~= nil and ANIM_TYPES[node.anim] and not node.unchanged(value, final, session.original) then
             local entry = byPrice[node.priceId]
             if not entry then
                 local cfg = cosmeticById[node.priceId] or Config.Cosmetic.extras[node.priceId]
@@ -1575,7 +2272,7 @@ local function buildEntries(session, changes)
         table.sort(entries[i].items, function(a, b) return (a.node.order or 1) < (b.node.order or 1) end)
     end
 
-    return entries
+    return entries, final
 end
 
 ---"Spoiler: Carbon", "Dækrøg: Til, #FF0000"
@@ -1624,18 +2321,136 @@ local function buildInvoiceLines(entries)
     return lines
 end
 
-local function runInstall(session, changes)
+-- ---------------------------------------------------------------------------
+-- Performance swap: take the old part OUT, then put the new one IN (parts from the workshop stash)
+-- ---------------------------------------------------------------------------
+
+-- perf:begin is rate limited to 1 s on the server; swaps from a preset can follow each other quickly
+-- (a skipped or failed swap), so the next begin waits the gap out instead of failing with too_fast
+local PERF_BEGIN_GAP_MS = 1100
+local nextPerfBegin = 0
+
+---One swap with the normal begin/finish flow. Manual mode (Config.ManualSwap, B2) uses
+---Anim.SwapManual for both steps; the server decides the mode and reports it in perf:begin.
+---@return 'done'|'cancelled'|'failed'
+local function runSwap(vehicle, category, level)
+    local cfg = Config.Performance[category]
+    if not cfg or not DoesEntityExist(vehicle) then return 'failed' end
+
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
+    while GetGameTimer() < nextPerfBegin do Wait(50) end
+    local ok, data = lib.callback.await('ap1le_mechanicjob:perf:begin', false, netId, category, level)
+    nextPerfBegin = GetGameTimer() + PERF_BEGIN_GAP_MS
+
+    if not ok or type(data) ~= 'table' then
+        notify(failText(data), 'error')
+        return 'failed'
+    end
+
+    local manual = data.manual == true
+    if data.manual == nil then manual = Config.ManualSwap ~= nil and Config.ManualSwap.enabled == true end
+
+    local function step(name, ms)
+        if manual and Anim.SwapManual then
+            return Anim.SwapManual(vehicle, category, name) == true
+        end
+        return Anim.Swap(vehicle, category, name, ms) == true
+    end
+
+    local function cancel()
+        lib.callback.await('ap1le_mechanicjob:cancel', false)
+    end
+
+    if not Mechanic.RequestControl(vehicle) then
+        cancel()
+        notify(locale('error'), 'error')
+        return 'failed'
+    end
+
+    local oldLevel = math.tointeger(data.oldLevel) or 0
+    local newLevel = math.tointeger(data.level) or level
+
+    -- Step 1: old part out (engine: hood open, hoist, unbolt, lift out)
+    if oldLevel > 0 then
+        notify(locale('swap_removing', cfg.label), 'info')
+
+        if not step('remove', data.removeTime) then
+            cancel()
+            notify(locale('cancelled'), 'info')
+            return 'cancelled'
+        end
+
+        -- The old part is out: show the car without it
+        Mechanic.RequestControl(vehicle)
+        setPerformanceMod(vehicle, cfg, 0)
+    end
+
+    -- Step 2: new part in (fetch, lift in, bolt down, close up)
+    if newLevel > 0 then
+        notify(locale('swap_installing', cfg.label), 'info')
+
+        if not step('install', data.installTime) then
+            cancel()
+            Mechanic.RequestControl(vehicle)
+            setPerformanceMod(vehicle, cfg, oldLevel) -- the old part goes back on visually
+            notify(locale('cancelled'), 'info')
+            return 'cancelled'
+        end
+    end
+
+    local finished, result = lib.callback.await('ap1le_mechanicjob:perf:finish', false)
+
+    if not finished then
+        if DoesEntityExist(vehicle) then
+            Mechanic.RequestControl(vehicle)
+            setPerformanceMod(vehicle, cfg, oldLevel)
+        end
+        notify(failText(result), 'error')
+        return 'failed'
+    end
+
+    local finalLevel = type(result) == 'table' and math.tointeger(result.level) or newLevel
+
+    if DoesEntityExist(vehicle) then
+        Mechanic.RequestControl(vehicle)
+        setPerformanceMod(vehicle, cfg, finalLevel)
+    end
+
+    if finalLevel > 0 then
+        notify(locale('swap_done', cfg.label, levelLabel(cfg, finalLevel)), 'success')
+    else
+        notify(locale('swap_removed', cfg.label), 'success')
+    end
+
+    return 'done'
+end
+
+---Validated pending swaps of a cart (owned vehicles only, levels this car supports, PERF_ORDER).
+local function cleanSwaps(session, swaps)
+    local out = {}
+    if type(swaps) ~= 'table' or #swaps == 0 then return out end
+
+    local list = buildSwaps(session, swaps)
+    for i = 1, #list do
+        out[#out + 1] = { category = list[i].category, level = list[i].level }
+    end
+    return out
+end
+
+---Cosmetic install (animations, apply, save), then the pending performance swaps one by one with the
+---normal swap flow, then the invoice for the cosmetic work.
+local function runInstall(session, changes, swaps)
     local vehicle = session.vehicle
-    local ok, entries = pcall(buildEntries, session, changes)
+    local ok, entries, final = pcall(buildEntries, session, changes)
     if not ok then
         print(('[ap1le_mechanicjob] tuning install: %s'):format(tostring(entries)))
-        entries = {}
+        entries, final = {}, {}
     end
 
     -- Back to the original look: the parts only appear once their animation is done
     Tuning.Close(true)
 
-    if #entries == 0 then
+    if #entries == 0 and #swaps == 0 then
         notify(locale('tuning_no_changes'), 'info')
         return
     end
@@ -1657,6 +2472,7 @@ local function runInstall(session, changes)
     end
 
     local applied = {}
+    local stopped = false
 
     for i = 1, #order do
         local group = groups[order[i]]
@@ -1667,6 +2483,7 @@ local function runInstall(session, changes)
 
         if not Anim.Cosmetic(vehicle, order[i], Config.Cosmetic.animTime) then
             notify(locale('cancelled'), 'info')
+            stopped = true
             break
         end
 
@@ -1676,14 +2493,11 @@ local function runInstall(session, changes)
 
         for n = 1, #group do
             local entry = group[n]
-            local context = {}
-            for m = 1, #entry.items do context[entry.items[m].node.id] = entry.items[m].value end
-            if context.tyreSmoke ~= nil then context.tyreSmoke = toBool(context.tyreSmoke) end
-
             local any = false
             for m = 1, #entry.items do
                 local item = entry.items[m]
-                local done, result = pcall(item.node.apply, vehicle, item.value, context)
+                -- The whole cart is the context (e.g. a chameleon primary keeps a pearl set in the same cart)
+                local done, result = pcall(item.node.apply, vehicle, item.value, final)
                 if done and result then any = true end
             end
 
@@ -1691,18 +2505,55 @@ local function runInstall(session, changes)
         end
     end
 
-    if #applied == 0 then return end
+    if #applied > 0 then
+        -- Persist (owned vehicles only; the server merges whitelisted cosmetic keys)
+        local props = lib.getVehicleProperties(vehicle)
+        local saved, result = lib.callback.await('ap1le_mechanicjob:tuning:save', false, session.netId, props)
 
-    -- Persist (owned vehicles only; the server merges whitelisted cosmetic keys)
-    local props = lib.getVehicleProperties(vehicle)
-    local saved, result = lib.callback.await('ap1le_mechanicjob:tuning:save', false, session.netId, props)
+        if not saved then
+            notify(failText(result), 'error')
+        elseif type(result) == 'table' and result.saved == false then
+            notify(locale('tuning_not_saved'), 'info')
+        else
+            notify(locale('tuning_saved'), 'success')
+        end
+    end
 
-    if not saved then
-        notify(failText(result), 'error')
-    elseif type(result) == 'table' and result.saved == false then
-        notify(locale('tuning_not_saved'), 'info')
-    else
-        notify(locale('tuning_saved'), 'success')
+    -- Pending swaps (presets / work orders), one by one, each with its own stock check
+    local swapsDone = 0
+    if not stopped and #swaps > 0 then
+        if not session.owned then
+            notify(locale('not_owned'), 'error')
+        else
+            for i = 1, #swaps do
+                local s = swaps[i]
+                local cfg = Config.Performance[s.category]
+                local item = s.level > 0 and cfg.levels[s.level]
+
+                if item and (session.stock[item] or 0) < 1 then
+                    notify(('%s: %s'):format(cfg.label, locale('stock_missing')), 'error')
+                else
+                    local status = runSwap(vehicle, s.category, s.level)
+                    if status == 'done' then
+                        swapsDone = swapsDone + 1
+                        if item then session.stock[item] = math.max(0, (session.stock[item] or 0) - 1) end
+                    elseif status == 'cancelled' then
+                        break
+                    end
+                end
+
+                if not DoesEntityExist(vehicle) then break end
+            end
+        end
+    end
+
+    if #applied > 0 or swapsDone > 0 then
+        Presets.ClearLast(session.plate)
+
+        if session.workOrderLoaded then
+            local cleared = Presets.WorkOrderClear(session.netId)
+            if cleared then notify(locale('workorder_done'), 'success') end
+        end
     end
 
     local lines = buildInvoiceLines(applied)
@@ -1712,106 +2563,43 @@ local function runInstall(session, changes)
 end
 
 RegisterNUICallback('tuning:install', function(data, cb)
-    if not state or state.installing or type(data) ~= 'table' or type(data.changes) ~= 'table' or #data.changes == 0 then
+    if not state or state.mode ~= 'mechanic' or state.installing or state.busy or type(data) ~= 'table'
+        or type(data.changes) ~= 'table' then
         cb({ ok = false })
         return
     end
 
     local session = state
+    local swaps = cleanSwaps(session, data.swaps)
+
+    if #data.changes == 0 and #swaps == 0 then
+        cb({ ok = false })
+        return
+    end
+
+    if #swaps > 0 and not session.owned then
+        local text = locale('not_owned')
+        notify(text, 'error')
+        cb({ ok = false, error = text })
+        return
+    end
+
     session.installing = true
+    working = true
 
     cb({ ok = true })
 
     CreateThread(function()
-        runInstall(session, data.changes)
+        local done, err = pcall(runInstall, session, data.changes, swaps)
+        if not done then
+            print(('[ap1le_mechanicjob] tuning install error: %s'):format(tostring(err)))
+        end
+        working = false
     end)
 end)
 
--- ---------------------------------------------------------------------------
--- Performance swap: take the old part OUT, then put the new one IN (parts from the workshop stash)
--- ---------------------------------------------------------------------------
-
-local function runSwap(vehicle, category, level)
-    local cfg = Config.Performance[category]
-    if not cfg or not DoesEntityExist(vehicle) then return end
-
-    local netId = NetworkGetNetworkIdFromEntity(vehicle)
-    local ok, data = lib.callback.await('ap1le_mechanicjob:perf:begin', false, netId, category, level)
-
-    if not ok or type(data) ~= 'table' then
-        notify(failText(data), 'error')
-        return
-    end
-
-    local function cancel()
-        lib.callback.await('ap1le_mechanicjob:cancel', false)
-    end
-
-    if not Mechanic.RequestControl(vehicle) then
-        cancel()
-        notify(locale('error'), 'error')
-        return
-    end
-
-    local oldLevel = math.tointeger(data.oldLevel) or 0
-    local newLevel = math.tointeger(data.level) or level
-
-    -- Step 1: old part out (engine: hood open, hoist, unbolt, lift out)
-    if oldLevel > 0 then
-        notify(locale('swap_removing', cfg.label), 'info')
-
-        if not Anim.Swap(vehicle, category, 'remove', data.removeTime) then
-            cancel()
-            notify(locale('cancelled'), 'info')
-            return
-        end
-
-        -- The old part is out: show the car without it
-        Mechanic.RequestControl(vehicle)
-        setPerformanceMod(vehicle, cfg, 0)
-    end
-
-    -- Step 2: new part in (fetch, lift in, bolt down, close up)
-    if newLevel > 0 then
-        notify(locale('swap_installing', cfg.label), 'info')
-
-        if not Anim.Swap(vehicle, category, 'install', data.installTime) then
-            cancel()
-            Mechanic.RequestControl(vehicle)
-            setPerformanceMod(vehicle, cfg, oldLevel) -- the old part goes back on visually
-            notify(locale('cancelled'), 'info')
-            return
-        end
-    end
-
-    local finished, result = lib.callback.await('ap1le_mechanicjob:perf:finish', false)
-
-    if not finished then
-        if DoesEntityExist(vehicle) then
-            Mechanic.RequestControl(vehicle)
-            setPerformanceMod(vehicle, cfg, oldLevel)
-        end
-        notify(failText(result), 'error')
-        return
-    end
-
-    local finalLevel = type(result) == 'table' and math.tointeger(result.level) or newLevel
-
-    if DoesEntityExist(vehicle) then
-        Mechanic.RequestControl(vehicle)
-        setPerformanceMod(vehicle, cfg, finalLevel)
-    end
-
-    if finalLevel > 0 then
-        local levelLabel = cfg.toggle and cfg.label or locale('ui_level', finalLevel)
-        notify(locale('swap_done', cfg.label, levelLabel), 'success')
-    else
-        notify(locale('swap_removed', cfg.label), 'success')
-    end
-end
-
 RegisterNUICallback('tuning:swap', function(data, cb)
-    if not state or state.installing or swapping or type(data) ~= 'table' then
+    if not state or state.mode ~= 'mechanic' or state.installing or state.busy or working or type(data) ~= 'table' then
         cb({ ok = false })
         return
     end
@@ -1842,7 +2630,7 @@ RegisterNUICallback('tuning:swap', function(data, cb)
     end
 
     local vehicle = state.vehicle
-    swapping = true
+    working = true
 
     -- Discard any cosmetic preview, close the screen, then do the physical work
     Tuning.Close(true)
@@ -1853,8 +2641,226 @@ RegisterNUICallback('tuning:swap', function(data, cb)
         if not done then
             print(('[ap1le_mechanicjob] swap error: %s'):format(tostring(err)))
         end
-        swapping = false
+        working = false
     end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- Presets, work orders, "Indlæs sidste" (C, B4)
+-- ---------------------------------------------------------------------------
+
+---Run fn(session) in a thread for a preset-type NUI call; one at a time per session.
+local function presetCall(cb, fn)
+    local session = state
+    if not session or session.installing or session.busy then
+        cb({ ok = false, error = locale('busy') })
+        return
+    end
+
+    session.busy = true
+    CreateThread(function()
+        local ok, result = pcall(fn, session)
+        session.busy = false
+
+        if not ok then
+            print(('[ap1le_mechanicjob] preset call error: %s'):format(tostring(result)))
+            result = { ok = false, error = locale('error') }
+        end
+        cb(result)
+    end)
+end
+
+---NUI answer for a loaded look: preview the cosmetic changes, list the pending swaps.
+local function loadedResult(session, changes, perf, extra)
+    local applied = previewChanges(session, changes)
+    local swaps = buildSwaps(session, perf)
+    local result = { ok = true, changes = applied, swaps = swaps }
+    for k, v in pairs(extra or {}) do result[k] = v end
+
+    if #applied == 0 and #swaps == 0 then
+        notify(locale('preset_nothing'), 'info')
+    end
+
+    return result
+end
+
+RegisterNUICallback('tuning:loadLast', function(_, cb)
+    presetCall(cb, function(session)
+        local last = Presets.GetLast(session.plate, session.model)
+        if not last then return { ok = false, error = locale('lastcart_none') } end
+
+        local changes = cleanChanges(session, last.changes)
+        return loadedResult(session, changes, last.swaps)
+    end)
+end)
+
+RegisterNUICallback('tuning:presets', function(_, cb)
+    presetCall(cb, function(session)
+        local ok, data = Presets.List(session.model)
+        if not ok then return { ok = false, error = failText(data) } end
+        return { ok = true, builtin = data.builtin, mine = data.mine }
+    end)
+end)
+
+RegisterNUICallback('tuning:presetApply', function(data, cb)
+    local id = type(data) == 'table' and data.id
+    if type(id) ~= 'string' and type(id) ~= 'number' then
+        cb({ ok = false, error = locale('preset_not_found') })
+        return
+    end
+
+    presetCall(cb, function(session)
+        local ok, preset = Presets.Get(id)
+        if not ok then
+            local text = failText(preset)
+            notify(text, 'error')
+            return { ok = false, error = text }
+        end
+
+        local cosmetic = preset.data.cosmetic
+        -- Own presets belong to one model; never apply mod indices of another model
+        local model = math.tointeger(preset.model)
+        if model and (model & 0xFFFFFFFF) ~= (session.model & 0xFFFFFFFF) then cosmetic = nil end
+
+        local changes = changesFromProps(session, cosmetic)
+        local result = loadedResult(session, changes, preset.data.performance, { name = preset.name })
+        if #result.changes > 0 or #result.swaps > 0 then
+            notify(locale('preset_applied', preset.name or ''), 'success')
+        end
+        return result
+    end)
+end)
+
+RegisterNUICallback('tuning:presetSave', function(data, cb)
+    if type(data) ~= 'table' then
+        cb({ ok = false, error = locale('error') })
+        return
+    end
+
+    presetCall(cb, function(session)
+        local name = Presets.CleanName(data.name)
+
+        if not name then
+            local answer = withCoreDialog(session, function()
+                return Ap1le.InputDialog(locale('preset_save_title'), {
+                    { type = 'input', label = locale('preset_name'), required = true, minLength = 1,
+                      maxLength = Presets.MaxNameLength, icon = 'bookmark' },
+                }, { confirmLabel = locale('preset_save_confirm') })
+            end)
+            if state ~= session then return { ok = false } end
+            name = type(answer) == 'table' and Presets.CleanName(answer[1]) or nil
+            if not name then return { ok = false, cancelled = true } end
+        end
+
+        local changes = cleanChanges(session, data.changes)
+        local presetData = {
+            cosmetic = propsFromChanges(session, changes, true),
+            performance = performanceFromSwaps(session, data.swaps, true),
+        }
+
+        local ok, result = Presets.Save(session.model, name, presetData)
+        if not ok then
+            local text = failText(result)
+            notify(text, 'error')
+            return { ok = false, error = text }
+        end
+
+        notify(locale('preset_saved', name), 'success')
+        return { ok = true, id = type(result) == 'table' and result.id or nil, name = name }
+    end)
+end)
+
+RegisterNUICallback('tuning:presetDelete', function(data, cb)
+    local id = type(data) == 'table' and toInt(data.id)
+    if not id then
+        cb({ ok = false, error = locale('preset_not_found') })
+        return
+    end
+
+    presetCall(cb, function()
+        local ok, result = Presets.Delete(id)
+        if not ok then
+            local text = failText(result)
+            notify(text, 'error')
+            return { ok = false, error = text }
+        end
+
+        notify(locale('preset_deleted'), 'success')
+        return { ok = true }
+    end)
+end)
+
+RegisterNUICallback('tuning:workorderLoad', function(_, cb)
+    if not state or state.mode ~= 'mechanic' then
+        cb({ ok = false, error = locale('error') })
+        return
+    end
+
+    presetCall(cb, function(session)
+        local wo = session.workOrder
+        if not wo then return { ok = false, error = locale('workorder_none') } end
+
+        local changes = changesFromProps(session, wo.data.cosmetic)
+        session.workOrderLoaded = true
+        return loadedResult(session, changes, wo.data.performance, { owner = wo.owner_name })
+    end)
+end)
+
+RegisterNUICallback('tuning:workorderSend', function(data, cb)
+    if not state or state.mode ~= 'design' or type(data) ~= 'table' then
+        cb({ ok = false, error = locale('error') })
+        return
+    end
+
+    presetCall(cb, function(session)
+        local changes = cleanChanges(session, data.changes)
+        local values = {}
+        for i = 1, #changes do values[changes[i].id] = changes[i].value end
+        local final = finalContext(values)
+
+        -- Only real changes become the customer's wish
+        local wanted = {}
+        for i = 1, #changes do
+            local node = session.nodes[changes[i].id]
+            local okSame, same = pcall(node.unchanged, changes[i].value, final, session.original)
+            if okSame and not same then wanted[#wanted + 1] = changes[i] end
+        end
+
+        local presetData = {
+            cosmetic = propsFromChanges(session, wanted, false),
+            performance = performanceFromSwaps(session, cleanSwaps(session, data.swaps), false),
+        }
+
+        if next(presetData.cosmetic) == nil and next(presetData.performance) == nil then
+            local text = locale('workorder_empty')
+            notify(text, 'error')
+            return { ok = false, error = text }
+        end
+
+        local ok, result = Presets.WorkOrderSave(session.netId, presetData)
+        if not ok then
+            local text = failText(result)
+            notify(text, 'error')
+            return { ok = false, error = text }
+        end
+
+        notify(locale('workorder_sent'), 'success')
+
+        -- Preview only: the car goes back to how it was
+        SetTimeout(0, function()
+            if state == session then Tuning.Close(true) end
+        end)
+
+        return { ok = true }
+    end)
+end)
+
+-- Check the optional texture dictionaries once in the background, so the first tuning screen does
+-- not wait for them (openSession re-checks; a finished check is cached)
+CreateThread(function()
+    Wait(3000)
+    checkChameleon()
+    loadTxd(PLATE_TXD, 2000)
 end)
 
 -- ---------------------------------------------------------------------------
@@ -1866,6 +2872,10 @@ AddEventHandler('onResourceStop', function(resource)
 
     if state then
         Tuning.Close(true, false)
+    end
+
+    for txd, loaded in pairs(txdAvailable) do
+        if loaded then SetStreamedTextureDictAsNoLongerNeeded(txd) end
     end
 
     -- Make sure no scripted camera survives the restart

@@ -4,9 +4,13 @@
 -- re-priced stay as they are).
 -- owned_vehicles is ESX's existing table; this script does not change it.
 --
--- RESTART THE SERVER after running this file: ESX loads jobs/grades and esx_addonaccount loads shared
--- accounts only when they start. Until then hiring/promoting (unknown job grade) and ordering parts
--- (society account not found) fail.
+-- RESTART THE SERVER after running this file (or at least es_extended's job refresh plus
+-- `restart esx_addonaccount` and then `restart esx_society`): ESX loads jobs/grades and esx_addonaccount
+-- loads shared accounts only when they start. Until then hiring/promoting (unknown job grade), ordering
+-- parts and the computer's deposit/withdraw (society account not found) fail.
+--
+-- Grade 3 is named 'boss' on purpose: esx_society only lets grades whose NAME is in its
+-- Config.BossGrades (default 'boss') withdraw from the society.
 
 -- 1) Job
 INSERT IGNORE INTO `jobs` (`name`, `label`, `whitelisted`) VALUES
@@ -120,10 +124,45 @@ CREATE TABLE IF NOT EXISTS `ap1le_mechanicjob_transactions` (
     KEY `created_at` (`created_at`)
 );
 
--- 9) Cosmetic price overrides set from the chef's computer (id = Config.Cosmetic mod id or extras key).
+-- 9) Price overrides set from the chef's computer (id = Config.Cosmetic mod id, extras key or 'wash').
 -- A missing row means the config default applies.
 CREATE TABLE IF NOT EXISTS `ap1le_mechanicjob_prices` (
     `id` VARCHAR(40) NOT NULL,
     `price` INT UNSIGNED NOT NULL,
     PRIMARY KEY (`id`)
+);
+
+-- ---------------------------------------------------------------------------------------------
+-- v3 tables (unix seconds as well)
+-- ---------------------------------------------------------------------------------------------
+
+-- 10) Tuning presets. A player's preset belongs to one vehicle model (cosmetic mod indices differ per
+-- model); built-in presets live in Config.Presets.builtin, not here.
+-- model = unsigned model hash. data = JSON {"cosmetic": {<ox_lib prop key>: value}, "performance": {<category>: level}}
+CREATE TABLE IF NOT EXISTS `ap1le_mechanicjob_presets` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `owner` VARCHAR(64) NOT NULL,
+    `owner_name` VARCHAR(100) NOT NULL DEFAULT '',
+    `name` VARCHAR(64) NOT NULL,
+    `model` INT UNSIGNED NOT NULL,
+    `data` LONGTEXT NOT NULL,
+    `created_at` INT UNSIGNED NOT NULL,
+    PRIMARY KEY (`id`),
+    KEY `owner_model` (`owner`, `model`)
+);
+
+-- 11) Customer work orders sent from a workshop terminal: one per vehicle (trimmed plate), same data
+-- format as presets. Deleted by the resource after expires_at (Config.Presets.workOrderHours).
+-- workshop = the terminal's workshop id. model = unsigned model hash of the car it was designed on.
+CREATE TABLE IF NOT EXISTS `ap1le_mechanicjob_workorders` (
+    `plate` VARCHAR(16) NOT NULL,
+    `workshop` VARCHAR(50) NULL DEFAULT NULL,
+    `model` INT UNSIGNED NOT NULL,
+    `data` LONGTEXT NOT NULL,
+    `owner` VARCHAR(64) NOT NULL,
+    `owner_name` VARCHAR(100) NOT NULL DEFAULT '',
+    `created_at` INT UNSIGNED NOT NULL,
+    `expires_at` INT UNSIGNED NOT NULL,
+    PRIMARY KEY (`plate`),
+    KEY `expires_at` (`expires_at`)
 );

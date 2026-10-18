@@ -60,7 +60,8 @@ local function nearbyPlayers()
     return options
 end
 
----Clean prefill lines: labels trimmed, amounts whole numbers >= 0. One field is reserved for the
+---Clean prefill lines: labels trimmed, amounts whole numbers >= 0. A line carries its amount as `price`
+---(CONTRACT v3) or `amount` (v2). One field is reserved for the
 ---mechanic's own extra line, so surplus lines are merged into one "other" line instead of being lost.
 ---@param prefill any
 ---@return { label: string, amount: integer }[]
@@ -70,7 +71,7 @@ local function cleanPrefill(prefill)
     if type(prefill) == 'table' then
         for i = 1, #prefill do
             local line = prefill[i]
-            local amount = type(line) == 'table' and tonumber(line.amount)
+            local amount = type(line) == 'table' and tonumber(line.price or line.amount)
 
             if amount and type(line.label) == 'string' then
                 lines[#lines + 1] = {
@@ -95,7 +96,7 @@ local function cleanPrefill(prefill)
 end
 
 ---Open the create-invoice dialog for the nearest customers. Must run in a thread (the dialog waits).
----@param prefill? { label: string, amount: integer }[]
+---@param prefill? { label: string, price?: integer, amount?: integer }[]
 function Billing.OpenCreate(prefill)
     if creating then return end
 

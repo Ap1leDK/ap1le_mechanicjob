@@ -1,8 +1,12 @@
--- ap1le_mechanicjob: the workshop computers (client side).
--- A laptop prop per workshop (local, non-networked, only while the player is near) with an ox_target
--- "use computer" option. Opening: server check -> Anim.Laptop (walk up and type) -> scripted camera on the
--- screen -> NUI focus -> 'laptop:open'. The laptop NUI talks to the server only through 'laptop:request',
--- which forwards a whitelist of callbacks (the server re-checks job, grade and distance on every call).
+-- ap1le_mechanicjob: the workshop computers and customer terminals (client side).
+-- Computer: a laptop prop per workshop (local, non-networked, only while the player is near) with an
+-- ox_target "use computer" option. Opening: server check -> Anim.Laptop (walk up and type) -> scripted
+-- camera on the screen -> NUI focus -> 'laptop:open'. The laptop NUI talks to the server only through
+-- 'laptop:request', which forwards a whitelist of callbacks (the server re-checks job, grade and distance
+-- on every call). The society deposit/withdraw go through the standard esx_society events (see
+-- societyTransfer below).
+-- Terminal: a kiosk per workshop (ox_target for everyone) that opens the tuning screen in design mode
+-- on the player's own nearby vehicle (Tuning.OpenDesign).
 
 Computer = {}
 
@@ -221,6 +225,101 @@ local function normalise(value, depth)
     return nil
 end
 
+-- ---------------------------------------------------------------------------
+-- Society deposit / withdraw (standard esx_society)
+-- ---------------------------------------------------------------------------
+-- Why: our own society code failed on deposits (v2). The money is now moved by esx_society's own server
+-- events (esx_society:depositMoney / withdrawMoney), which only exist as net events, so the chef's client
+-- has to trigger them. Because a client could skip our checks, the flow is guarded by the server:
+--   1. computer:deposit / computer:withdraw (amount) -> chef at the computer, amount, cash / society
+--      balance, esx_society's boss rule. Returns { kind, society, amount } and remembers the intent.
+--   2. TriggerServerEvent('esx_society:depositMoney' | 'esx_society:withdrawMoney', society, amount)
+--      with the amount the SERVER returned.
+--   3. computer:transferResult (kind) -> the server waits until esx_addonaccount reported the matching
+--      change of the society account, logs it, and returns the balance.
+--   4. The new balance is read with the standard esx_society callback (esx_society:getSocietyMoney); when
+--      that answers 0 for a grade that esx_society does not count as boss, the server's balance is used.
+
+local TRANSFERS = {
+    ['computer:deposit'] = { kind = 'deposit', event = 'esx_society:depositMoney' },
+    ['computer:withdraw'] = { kind = 'withdraw', event = 'esx_society:withdrawMoney' },
+}
+
+local BALANCE_TIMEOUT_MS = 3000
+local transferring = false
+
+---Society balance through esx_society's own callback, or nil when it does not answer.
+---@param society string
+---@return number?
+local function societyBalance(society)
+    local answer = promise.new()
+    local settled = false
+
+    local function settle(value)
+        if settled then return end
+        settled = true
+        answer:resolve(value)
+    end
+
+    local called = pcall(function()
+        if ESX.TriggerServerCallback then
+            ESX.TriggerServerCallback('esx_society:getSocietyMoney', settle, society)
+        else
+            settle(nil)
+        end
+    end)
+    if not called then settle(nil) end
+
+    SetTimeout(BALANCE_TIMEOUT_MS, function() settle(nil) end)
+
+    return tonumber(Citizen.Await(answer))
+end
+
+---Run one deposit or withdrawal. Returns ok, data ({ kind, amount, balance }) or false, locale key.
+---@param method string 'computer:deposit' | 'computer:withdraw'
+---@param args table
+---@return boolean, any
+local function societyTransfer(method, args)
+    local transfer = TRANSFERS[method]
+
+    if transferring then return false, 'too_fast' end
+    transferring = true
+
+    local ok, success, result = pcall(function()
+        local allowed, intent = lib.callback.await('ap1le_mechanicjob:' .. method, false, args[1])
+        if not allowed then return false, intent end
+
+        local amount = type(intent) == 'table' and math.tointeger(tonumber(intent.amount))
+        if not amount or amount < 1 then return false, 'error' end
+
+        local society = (type(intent) == 'table' and type(intent.society) == 'string') and intent.society or Config.Job
+
+        TriggerServerEvent(transfer.event, society, amount)
+
+        local confirmed, outcome = lib.callback.await('ap1le_mechanicjob:computer:transferResult', false, transfer.kind)
+        if not confirmed then return false, outcome end
+
+        local serverBalance = type(outcome) == 'table' and tonumber(outcome.balance) or nil
+        local balance = societyBalance(society)
+
+        -- esx_society answers 0 for grades that are not in its boss list: trust the server's number then
+        if balance == nil or (balance == 0 and serverBalance and serverBalance > 0) then
+            balance = serverBalance
+        end
+
+        return true, { kind = transfer.kind, amount = amount, balance = balance }
+    end)
+
+    transferring = false
+
+    if not ok then
+        print(('^1[ap1le_mechanicjob] society %s failed: %s^0'):format(transfer.kind, tostring(success)))
+        return false, 'error'
+    end
+
+    return success, result
+end
+
 -- Success notification of the mutating methods: method -> function(args, data) -> text
 local SUCCESS = {
     ['order:place'] = function(_, data)
@@ -231,8 +330,13 @@ local SUCCESS = {
     ['computer:hire'] = function() return locale('pc_hired') end,
     ['computer:setGrade'] = function() return locale('pc_grade_set') end,
     ['computer:fire'] = function() return locale('pc_fired') end,
-    ['computer:deposit'] = function(args) return locale('pc_deposited', Mechanic.FormatMoney(args[1])) end,
-    ['computer:withdraw'] = function(args) return locale('pc_withdrawn', Mechanic.FormatMoney(args[1])) end,
+    -- The amount the server confirmed (data.amount), not the one typed in the NUI
+    ['computer:deposit'] = function(args, data)
+        return locale('pc_deposited', Mechanic.FormatMoney(type(data) == 'table' and data.amount or args[1]))
+    end,
+    ['computer:withdraw'] = function(args, data)
+        return locale('pc_withdrawn', Mechanic.FormatMoney(type(data) == 'table' and data.amount or args[1]))
+    end,
     ['computer:setPrices'] = function() return locale('pc_prices_saved') end,
 }
 
@@ -246,7 +350,13 @@ RegisterNUICallback('laptop:request', function(data, cb)
     local args = type(data.args) == 'table' and normalise(data.args, 0) or {}
     if type(args) ~= 'table' then args = {} end
 
-    local ok, result = lib.callback.await('ap1le_mechanicjob:' .. method, false, table.unpack(args, 1, 4))
+    local ok, result
+
+    if TRANSFERS[method] then
+        ok, result = societyTransfer(method, args)
+    else
+        ok, result = lib.callback.await('ap1le_mechanicjob:' .. method, false, table.unpack(args, 1, 4))
+    end
 
     local success = SUCCESS[method]
 
@@ -408,6 +518,143 @@ end
 
 CreateThread(setup)
 
+-- ---------------------------------------------------------------------------
+-- Customer terminals (design mode)
+-- ---------------------------------------------------------------------------
+-- One kiosk per workshop (Config.Workshops[i].terminal = vec4, w = heading of the kiosk). Everybody can use
+-- it (no job check): it opens the tuning screen in design mode on the player's OWN vehicle. The client only
+-- picks the vehicle in reach; the server (terminal:open) checks the terminal distance and that the vehicle
+-- belongs to the player.
+-- The kiosk prop is optional and local (non-networked). prop_parknmeter_02 is the pay-and-display ticket
+-- machine; it is NOT an ATM model on purpose, so banking scripts that add ox_target options to ATM models
+-- never attach their "use ATM" options to it. Set KIOSK_MODEL to nil to use the invisible target only.
+-- coords.z of the terminal is the floor level: the prop is lifted by the model's lowest point.
+
+local KIOSK_MODEL = `prop_parknmeter_02`
+local KIOSK_RANGE = 50.0                    -- the prop exists within this distance
+local TERMINAL_RADIUS = 1.1                 -- target sphere
+local TERMINAL_CENTER_Z = 1.0               -- the target sphere sits this high above the floor
+local TERMINAL_DISTANCE = 2.0               -- ox_target use distance (server limit is 3.0 m)
+local TERMINAL_OPTION = 'ap1le_mechanicjob:terminal:'
+
+local terminals = {}                        -- per workshop: { workshop, prop, spawning, point, zone }
+
+---Open the design mode on the player's own vehicle: the one they sit in, else the closest one in reach.
+local function useTerminal()
+    if Tuning.IsOpen() or Anim.IsBusy() then return end
+
+    local vehicle = cache.vehicle
+
+    if not vehicle then
+        vehicle = lib.getClosestVehicle(GetEntityCoords(cache.ped), Config.MaxVehicleDistance, false)
+    end
+
+    -- Tell the player what to do instead of failing silently. Whether it is THEIR vehicle is checked by the
+    -- server, which answers with its own message (workorder_not_owned).
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+        Ap1le.Notify(locale('terminal_no_vehicle'), 'error')
+        return
+    end
+
+    Tuning.OpenDesign(vehicle)
+end
+
+local function terminalOption(entry)
+    return {
+        name = TERMINAL_OPTION .. entry.workshop.id,
+        icon = 'fa-solid fa-pen-ruler',
+        label = locale('target_terminal'),
+        distance = TERMINAL_DISTANCE,
+        canInteract = function()
+            return not Anim.IsBusy() and not Tuning.IsOpen() and not Computer.IsOpen()
+        end,
+        onSelect = useTerminal,
+    }
+end
+
+local function registerTerminalZone(entry)
+    local c = entry.workshop.terminal
+
+    entry.zone = exports.ox_target:addSphereZone({
+        name = TERMINAL_OPTION .. entry.workshop.id,
+        coords = vec3(c.x, c.y, c.z + TERMINAL_CENTER_Z),
+        radius = TERMINAL_RADIUS,
+        debug = false,
+        options = { terminalOption(entry) },
+    })
+end
+
+local function removeTerminalZone(entry)
+    if entry.zone then
+        pcall(function() exports.ox_target:removeZone(entry.zone, true) end)
+        entry.zone = nil
+    end
+end
+
+local function spawnKiosk(entry)
+    if not KIOSK_MODEL or entry.prop or entry.spawning or stopped then return end
+    entry.spawning = true
+
+    CreateThread(function()
+        local loaded = pcall(lib.requestModel, KIOSK_MODEL, 3000)
+
+        -- Left the range or the resource stopped while the model streamed in
+        if not loaded or stopped or not entry.spawning then
+            entry.spawning = false
+            return
+        end
+
+        local c = entry.workshop.terminal
+        local low = GetModelDimensions(KIOSK_MODEL)
+        local prop = CreateObject(KIOSK_MODEL, c.x, c.y, c.z - low.z, false, false, false)
+        SetModelAsNoLongerNeeded(KIOSK_MODEL)
+        entry.spawning = false
+
+        if not prop or prop == 0 then return end
+
+        SetEntityHeading(prop, c.w or 0.0)
+        FreezeEntityPosition(prop, true)
+        entry.prop = prop
+    end)
+end
+
+local function despawnKiosk(entry)
+    entry.spawning = false
+
+    local prop = entry.prop
+    entry.prop = nil
+
+    if prop and DoesEntityExist(prop) then
+        DeleteEntity(prop)
+    end
+end
+
+local function setupTerminals()
+    for i = 1, #Config.Workshops do
+        local ws = Config.Workshops[i]
+        local c = ws.terminal
+
+        if c then
+            local entry = { workshop = ws }
+            terminals[#terminals + 1] = entry
+
+            registerTerminalZone(entry)
+
+            if KIOSK_MODEL then
+                -- lib.points runs onEnter on its next tick when the player already stands in range
+                entry.point = lib.points.new({
+                    coords = vec3(c.x, c.y, c.z),
+                    distance = KIOSK_RANGE,
+                    onEnter = function() spawnKiosk(entry) end,
+                    onExit = function() despawnKiosk(entry) end,
+                })
+            end
+        end
+    end
+end
+
+CreateThread(setupTerminals)
+
 -- ox_target forgets zones and entity targets when it restarts
 AddEventHandler('onClientResourceStart', function(resource)
     if resource ~= 'ox_target' then return end
@@ -428,6 +675,11 @@ AddEventHandler('onClientResourceStart', function(resource)
                 if entry.zone then pcall(function() exports.ox_target:removeZone(entry.zone, true) end) end
                 registerZone(entry)
             end
+        end
+
+        for i = 1, #terminals do
+            removeTerminalZone(terminals[i])
+            registerTerminalZone(terminals[i])
         end
     end)
 end)
@@ -460,4 +712,18 @@ AddEventHandler('onResourceStop', function(resource)
     end
 
     entries = {}
+
+    for i = 1, #terminals do
+        local entry = terminals[i]
+
+        if entry.point then
+            entry.point:remove()
+            entry.point = nil
+        end
+
+        despawnKiosk(entry)
+        removeTerminalZone(entry)
+    end
+
+    terminals = {}
 end)

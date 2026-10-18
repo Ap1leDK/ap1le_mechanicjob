@@ -2,6 +2,24 @@
 -- A swap is two physical steps on the client (remove old part, install new part). The server reads the
 -- current level from owned_vehicles, enforces the combined minimum time, moves the items and saves the level.
 -- Parts come from the stash of the workshop the mechanic is in, and the old part goes back into it.
+-- The same begin/finish pair serves the automatic sequence and the manual mode (Config.ManualSwap).
+
+-- Manual swap mode (Config.ManualSwap): decided by the server config only, never by the client. In
+-- manual mode the mechanic walks, fetches tools and the hoist and lifts the part himself, so the server
+-- uses the (smaller) Config.ManualSwap.minTimeFactor of the normal sequence time as the minimum, and a
+-- longer abandon timeout because the real length depends on the player.
+local MANUAL = type(Config.ManualSwap) == 'table' and Config.ManualSwap.enabled == true
+local MANUAL_TIMEOUT_MS = 15 * 60000
+
+---Minimum time factor for swaps: Config.ManualSwap.minTimeFactor in manual mode, else Config.MinTimeFactor
+---(clamped to 0..1 so a config typo can never make the minimum longer than the sequence).
+---@return number
+local function swapTimeFactor()
+    local factor = MANUAL and tonumber(Config.ManualSwap.minTimeFactor) or tonumber(Config.MinTimeFactor) or 0.8
+    if factor ~= factor or factor < 0 then return 0 end
+    if factor > 1 then return 1 end
+    return factor
+end
 
 ---True if another player already has a pending swap on this plate (prevents parallel swaps that
 ---would both return the same old part).
@@ -103,8 +121,10 @@ lib.callback.register('ap1le_mechanicjob:perf:begin', function(source, netId, ca
         plate = plate,
         workshop = workshop.id,
         stashId = stashId,
-        minMs = math.floor(expected * Config.MinTimeFactor),
+        minMs = math.floor(expected * swapTimeFactor()),
         expectedMs = expected,
+        timeoutMs = MANUAL and (expected * 2 + MANUAL_TIMEOUT_MS) or nil,
+        manual = MANUAL,
     })
 
     return true, {
@@ -112,6 +132,7 @@ lib.callback.register('ap1le_mechanicjob:perf:begin', function(source, netId, ca
         level = level,
         removeTime = cfg.removeTime,
         installTime = cfg.installTime,
+        manual = MANUAL,
     }
 end)
 
@@ -238,7 +259,8 @@ lib.callback.register('ap1le_mechanicjob:perf:finish', function(source)
     if not cfg then return false, 'error' end
 
     if not Mechanic.ElapsedOk(pending) then
-        Mechanic.Flag(source, ('perf:finish too fast (%d ms < %d ms)'):format(GetGameTimer() - pending.startedAt, pending.minMs))
+        Mechanic.Flag(source, ('perf:finish too fast (%d ms < %d ms%s)'):format(GetGameTimer() - pending.startedAt, pending.minMs,
+            pending.manual and ', manual' or ''))
         return false, 'too_fast'
     end
 
